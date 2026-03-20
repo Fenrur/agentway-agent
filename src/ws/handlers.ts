@@ -41,9 +41,14 @@ function handleInjectMessage(content: string, attachments?: string[]): void {
   // Pour l'instant, on passe juste le content textuel au runner.
   let prompt = content;
   if (attachments && attachments.length > 0) {
-    // Ajouter les references aux fichiers joints dans le prompt
-    const attachmentLines = attachments.map((path) => `[Attached file: ${path}]`).join("\n");
-    prompt = `${content}\n\n${attachmentLines}`;
+    // Filter attachment paths to prevent path traversal
+    const safePaths = attachments.filter((p) =>
+      typeof p === "string" && !p.includes("..") && !p.startsWith("/")
+    );
+    if (safePaths.length > 0) {
+      const attachmentLines = safePaths.map((path) => `[Attached file: ${path}]`).join("\n");
+      prompt = `${content}\n\n${attachmentLines}`;
+    }
   }
 
   // Fire-and-forget : le runner gere les statuts et les erreurs
@@ -52,25 +57,58 @@ function handleInjectMessage(content: string, attachments?: string[]): void {
   });
 }
 
+/** Maximum exec command runtime (30 seconds). */
+const EXEC_TIMEOUT_MS = 30_000;
+
+/** Maximum output size per exec (1MB). */
+const EXEC_MAX_OUTPUT = 1024 * 1024;
+
+/** Concurrency guard — only one exec at a time. */
+let execRunning = false;
+
 /**
  * Execute a command locally and send the result back to the backend.
+ * Protected with timeout, output limit, and concurrency guard.
  */
 async function handleExec(requestId: string, command: string): Promise<void> {
+  if (execRunning) {
+    sendMessage({ type: "exec_result", requestId, stdout: "", stderr: "Another exec is already running", exitCode: 1 });
+    return;
+  }
+
+  // Validate command length
+  if (command.length > 10_000) {
+    sendMessage({ type: "exec_result", requestId, stdout: "", stderr: "Command too long (max 10000 chars)", exitCode: 1 });
+    return;
+  }
+
+  execRunning = true;
   console.log(`[handlers] exec received (requestId: ${requestId}, cmd: ${command.slice(0, 80)}...)`);
+
   try {
     const proc = Bun.spawn(["bash", "-c", command], {
       stdout: "pipe",
       stderr: "pipe",
     });
+
+    // Timeout: kill process if it takes too long
+    const timeout = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+    }, EXEC_TIMEOUT_MS);
+
     const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      new Response(proc.stdout).text().then((s) => s.slice(0, EXEC_MAX_OUTPUT)),
+      new Response(proc.stderr).text().then((s) => s.slice(0, EXEC_MAX_OUTPUT)),
     ]);
     await proc.exited;
+    clearTimeout(timeout);
+
     sendMessage({ type: "exec_result", requestId, stdout, stderr, exitCode: proc.exitCode ?? 1 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendMessage({ type: "exec_result", requestId, stdout: "", stderr: msg, exitCode: 1 });
+  } finally {
+    execRunning = false;
   }
 }
 

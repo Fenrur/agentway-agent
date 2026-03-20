@@ -13,6 +13,9 @@ import { loadSession, saveSession } from "./session.ts";
 /** Grace period entre SIGTERM et SIGKILL (ms) */
 const SIGKILL_GRACE_MS = 5_000;
 
+/** Maximum execution time for a single Claude Code run (30 minutes) */
+const MAX_RUNTIME_MS = 30 * 60 * 1000;
+
 /** Pattern pour detecter un lien d'auth dans le texte */
 const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s"'<>]*/i;
 
@@ -42,15 +45,15 @@ export function killActive(): boolean {
   if (!activeProc) return false;
 
   console.log("[runner] Killing active Claude Code process...");
+  const proc = activeProc;
 
   try {
-    activeProc.kill("SIGTERM");
+    proc.kill("SIGTERM");
   } catch {
     // Processus deja mort
   }
 
   // SIGKILL apres la grace period
-  const proc = activeProc;
   setTimeout(() => {
     try {
       proc.kill("SIGKILL");
@@ -59,8 +62,8 @@ export function killActive(): boolean {
     }
   }, SIGKILL_GRACE_MS);
 
-  activeProc = null;
-  isRunning = false;
+  // Note: isRunning is reset in the finally block of runPrompt()
+  // when proc.exited resolves after SIGTERM/SIGKILL
   return true;
 }
 
@@ -143,6 +146,12 @@ async function spawnClaude(prompt: string): Promise<void> {
 
   activeProc = proc;
 
+  // Max runtime timeout
+  const runtimeTimeout = setTimeout(() => {
+    console.warn("[runner] Claude Code exceeded max runtime, killing...");
+    killActive();
+  }, MAX_RUNTIME_MS);
+
   // Lire stderr en parallele (pour les logs)
   const stderrPromise = new Response(proc.stderr as ReadableStream).text();
 
@@ -152,6 +161,7 @@ async function spawnClaude(prompt: string): Promise<void> {
 
   // Attendre la fin du processus
   await proc.exited;
+  clearTimeout(runtimeTimeout);
 
   const exitCode = proc.exitCode ?? 1;
   const stderr = await stderrPromise;

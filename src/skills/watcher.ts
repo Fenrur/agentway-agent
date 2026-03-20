@@ -94,7 +94,7 @@ function extractDescription(content: string): string {
 async function broadcastSkills(): Promise<void> {
   try {
     const skills = await scanSkills();
-    sendMessage({ type: "skills_update", skills } as any);
+    sendMessage({ type: "skills_update", skills });
     console.log(`[skills] Sent ${skills.length} skills to backend`);
   } catch (err) {
     console.error("[skills] Failed to scan/send skills:", err);

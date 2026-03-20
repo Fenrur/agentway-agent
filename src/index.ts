@@ -5,6 +5,7 @@
 import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
+import { killActive } from "./claude/runner.ts";
 
 console.log(`agentway-agent daemon started`);
 console.log(`Backend WebSocket URL: ${config.backendWsUrl}`);
@@ -18,6 +19,7 @@ startSkillsWatcher();
 // Gerer l'arret propre (SIGTERM de systemd, SIGINT de Ctrl+C)
 function gracefulShutdown(signal: string) {
   console.log(`[daemon] Received ${signal}, shutting down...`);
+  killActive();
   disconnect();
   process.exit(0);
 }
