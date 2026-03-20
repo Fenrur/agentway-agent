@@ -24,6 +24,9 @@ const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s
 /** Process Claude Code en cours d'execution */
 let activeProc: ReturnType<typeof Bun.spawn> | null = null;
 
+/** Lecteur stdout actif — annule immediatement lors du kill */
+let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
 /** Indique si le runner est en train de traiter un message */
 let isRunning = false;
 
@@ -46,6 +49,10 @@ export function killActive(): boolean {
 
   console.log("[runner] Killing active Claude Code process...");
   const proc = activeProc;
+
+  // Annuler le reader stdout immediatement pour debloquer readNdjsonStream
+  // (sinon reader.read() reste bloque jusqu'au SIGKILL 5s plus tard)
+  try { activeReader?.cancel(); } catch {}
 
   try {
     proc.kill("SIGTERM");
@@ -181,11 +188,20 @@ async function spawnClaude(prompt: string): Promise<void> {
  */
 async function readNdjsonStream(stdout: ReadableStream<Uint8Array>): Promise<void> {
   const reader = stdout.getReader();
+  activeReader = reader;
   const decoder = new TextDecoder();
   let buffer = "";
 
+  try {
   while (true) {
-    const { done, value } = await reader.read();
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      result = await reader.read();
+    } catch {
+      // Reader cancelled (kill signal) — sortie propre
+      break;
+    }
+    const { done, value } = result;
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
@@ -206,6 +222,10 @@ async function readNdjsonStream(stdout: ReadableStream<Uint8Array>): Promise<voi
   const remaining = buffer.trim();
   if (remaining) {
     processNdjsonLine(remaining);
+  }
+  } finally {
+    activeReader = null;
+    try { reader.releaseLock(); } catch {}
   }
 }
 
