@@ -3,6 +3,7 @@
 
 import type { DaemonInboundMessage } from "./types.ts";
 import { runPrompt, killActive } from "../claude/runner.ts";
+import { sendMessage } from "./client.ts";
 
 /**
  * Route un message inbound du backend vers le handler correspondant.
@@ -11,6 +12,10 @@ export function handleInboundMessage(msg: DaemonInboundMessage): void {
   switch (msg.type) {
     case "inject_message":
       handleInjectMessage(msg.content, msg.attachments);
+      break;
+
+    case "exec":
+      handleExec(msg.requestId, msg.command);
       break;
 
     case "kill":
@@ -45,6 +50,28 @@ function handleInjectMessage(content: string, attachments?: string[]): void {
   runPrompt(prompt).catch((error) => {
     console.error("[handlers] Unhandled error in runPrompt:", error);
   });
+}
+
+/**
+ * Execute a command locally and send the result back to the backend.
+ */
+async function handleExec(requestId: string, command: string): Promise<void> {
+  console.log(`[handlers] exec received (requestId: ${requestId}, cmd: ${command.slice(0, 80)}...)`);
+  try {
+    const proc = Bun.spawn(["bash", "-c", command], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    await proc.exited;
+    sendMessage({ type: "exec_result", requestId, stdout, stderr, exitCode: proc.exitCode ?? 1 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendMessage({ type: "exec_result", requestId, stdout: "", stderr: msg, exitCode: 1 });
+  }
 }
 
 /**

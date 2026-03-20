@@ -20,10 +20,10 @@ let intentionalClose = false;
 /**
  * Construit l'URL WebSocket complete avec query params d'authentification.
  */
-function buildWsUrl(backendWsUrl: string, agentId: string, token: string): string {
+function buildWsUrl(backendWsUrl: string, token: string): string {
   // Normaliser l'URL : retirer un eventuel trailing slash
   const base = backendWsUrl.replace(/\/$/, "");
-  return `${base}/ws/daemon?token=${encodeURIComponent(token)}&agentId=${encodeURIComponent(agentId)}`;
+  return `${base}/ws/daemon?token=${encodeURIComponent(token)}`;
 }
 
 /**
@@ -94,7 +94,7 @@ export function connect(
     ws = null;
   }
 
-  const url = buildWsUrl(backendWsUrl, agentId, token);
+  const url = buildWsUrl(backendWsUrl, token);
   console.log(`[ws-client] Connecting to ${backendWsUrl}/ws/daemon ...`);
 
   intentionalClose = false;
