@@ -30,6 +30,9 @@ let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 /** Indique si le runner est en train de traiter un message */
 let isRunning = false;
 
+/** Indique si un event "result" a ete recu pendant le run courant */
+let resultReceived = false;
+
 // === API publique ===
 
 /**
@@ -98,6 +101,7 @@ export async function runPrompt(prompt: string): Promise<void> {
   }
 
   isRunning = true;
+  resultReceived = false;
 
   // Notifier le backend : on travaille
   sendMessage({ type: "status", status: "working" });
@@ -111,6 +115,12 @@ export async function runPrompt(prompt: string): Promise<void> {
   } finally {
     isRunning = false;
     activeProc = null;
+
+    // Si Claude a ete interrompu avant d'envoyer un event "result" (kill),
+    // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
+    if (!resultReceived) {
+      sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+    }
 
     // Notifier le backend : on est idle
     sendMessage({ type: "status", status: "idle" });
@@ -244,6 +254,11 @@ function processNdjsonLine(line: string): void {
 
   // Forward l'event brut au backend
   sendMessage({ type: "stream_event", event });
+
+  // Marquer que le result a ete recu (run normal, pas interrompu)
+  if (event.type === "result") {
+    resultReceived = true;
+  }
 
   // Extraire le session ID de l'event "result"
   if (event.type === "result" && typeof event.session_id === "string") {
