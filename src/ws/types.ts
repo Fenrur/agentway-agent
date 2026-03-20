@@ -11,7 +11,7 @@ export type DaemonInboundMessage =
 // === Messages Daemon -> Backend (outbound) ===
 
 export type DaemonOutboundMessage =
-  | { type: "daemon_connected"; agentId: string }
+  | { type: "daemon_connected" }
   | { type: "stream_event"; event: unknown }
   | { type: "status"; status: "idle" | "working" }
   | { type: "auth_link"; url: string }

@@ -50,7 +50,6 @@ export function sendMessage(message: DaemonOutboundMessage): boolean {
  */
 function scheduleReconnect(
   backendWsUrl: string,
-  agentId: string,
   token: string,
 ): void {
   if (intentionalClose) return;
@@ -63,7 +62,7 @@ function scheduleReconnect(
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect(backendWsUrl, agentId, token);
+    connect(backendWsUrl, token);
   }, reconnectDelay);
 
   // Augmenter le delai pour la prochaine tentative (exponential backoff)
@@ -74,14 +73,13 @@ function scheduleReconnect(
  * Connecte le daemon au backend via WebSocket.
  *
  * Workflow :
- *   1. Ouvre la connexion vers /ws/daemon?token=...&agentId=...
+ *   1. Ouvre la connexion vers /ws/daemon?token=...
  *   2. A l'ouverture : envoie daemon_connected, reset le backoff
  *   3. A la reception : parse le JSON et route vers les handlers
  *   4. A la fermeture/erreur : planifie une reconnexion
  */
 export function connect(
   backendWsUrl: string,
-  agentId: string,
   token: string,
 ): void {
   // Fermer proprement une connexion existante
@@ -103,7 +101,7 @@ export function connect(
     ws = new WebSocket(url);
   } catch (error) {
     console.error("[ws-client] Failed to create WebSocket:", error);
-    scheduleReconnect(backendWsUrl, agentId, token);
+    scheduleReconnect(backendWsUrl, token);
     return;
   }
 
@@ -114,7 +112,7 @@ export function connect(
     reconnectDelay = INITIAL_DELAY_MS;
 
     // Envoyer le message daemon_connected
-    sendMessage({ type: "daemon_connected", agentId });
+    sendMessage({ type: "daemon_connected" });
   });
 
   ws.addEventListener("message", (event) => {
@@ -138,7 +136,7 @@ export function connect(
     console.log(`[ws-client] Disconnected (code: ${event.code}, reason: ${event.reason || "none"})`);
     ws = null;
 
-    scheduleReconnect(backendWsUrl, agentId, token);
+    scheduleReconnect(backendWsUrl, token);
   });
 
   ws.addEventListener("error", (event) => {

@@ -6,11 +6,11 @@ import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
 
-console.log(`agentway-agent daemon started (agentId: ${config.agentId})`);
+console.log(`agentway-agent daemon started`);
 console.log(`Backend WebSocket URL: ${config.backendWsUrl}`);
 
 // Connecter le WebSocket client au backend
-connect(config.backendWsUrl, config.agentId, config.daemonToken);
+connect(config.backendWsUrl, config.daemonToken);
 
 // Start watching for skills/commands changes
 startSkillsWatcher();

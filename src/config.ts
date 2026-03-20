@@ -14,9 +14,6 @@ export const config = {
   /** URL WebSocket du backend (ex: ws://192.168.1.100:3000) */
   backendWsUrl: requireEnv("BACKEND_WS_URL"),
 
-  /** Identifiant unique de cet agent (fourni par cloud-init) */
-  agentId: requireEnv("AGENT_ID"),
-
   /** Token d'authentification pour la connexion daemon -> backend */
   daemonToken: requireEnv("DAEMON_TOKEN"),
 } as const;
