@@ -198,6 +198,7 @@ async function spawnClaude(prompt: string): Promise<void> {
     "stream-json",
     "--verbose",
     "--dangerously-skip-permissions",
+    "--include-partial-messages",
   ];
 
   // Charger la session existante pour --resume
