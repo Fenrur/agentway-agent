@@ -3,6 +3,7 @@
 
 import type { DaemonInboundMessage, DaemonOutboundMessage } from "./types.ts";
 import { handleInboundMessage } from "./handlers.ts";
+import { isBusy } from "../claude/runner.ts";
 
 // === Constantes reconnexion ===
 
@@ -128,10 +129,12 @@ export function connect(
       return;
     }
 
-    // Handle auth_ok response — send daemon_connected after successful auth
+    // Handle auth_ok response — send daemon_connected + current status after successful auth
     if (msg.type === "auth_ok") {
       console.log("[ws-client] Authenticated successfully");
       sendMessage({ type: "daemon_connected" });
+      // After reconnect, tell the backend the real status so it doesn't think we're still working
+      sendMessage({ type: "status", status: isBusy() ? "working" : "idle" });
       return;
     }
 

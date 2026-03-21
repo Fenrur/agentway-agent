@@ -19,6 +19,9 @@ const MAX_RUNTIME_MS = 30 * 60 * 1000;
 /** Pattern pour detecter un lien d'auth dans le texte */
 const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s"'<>]*/i;
 
+/** Watchdog interval: check every 5s if the process died without cleanup */
+const WATCHDOG_INTERVAL_MS = 5_000;
+
 // === State ===
 
 /** Process Claude Code en cours d'execution */
@@ -32,6 +35,55 @@ let isRunning = false;
 
 /** Indique si un event "result" a ete recu pendant le run courant */
 let resultReceived = false;
+
+/** Watchdog timer */
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+// === Watchdog ===
+
+/**
+ * Starts a watchdog that checks every 5s if isRunning is true but
+ * activeProc is dead. This catches edge cases where the process dies
+ * without the finally block cleaning up (OOM kill, zombie, crash).
+ */
+function startWatchdog(): void {
+  stopWatchdog();
+  watchdogTimer = setInterval(() => {
+    if (!isRunning) return;
+
+    // Check if the process object exists but has already exited
+    if (activeProc && activeProc.exitCode !== null) {
+      console.warn(`[runner] Watchdog: process exited (code ${activeProc.exitCode}) but isRunning=true — forcing cleanup`);
+      isRunning = false;
+      activeProc = null;
+
+      if (!resultReceived) {
+        sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+      }
+      sendMessage({ type: "status", status: "idle" });
+      stopWatchdog();
+    }
+
+    // Check if there's no process at all but isRunning is stuck
+    if (!activeProc && isRunning) {
+      console.warn("[runner] Watchdog: no process but isRunning=true — forcing cleanup");
+      isRunning = false;
+
+      if (!resultReceived) {
+        sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+      }
+      sendMessage({ type: "status", status: "idle" });
+      stopWatchdog();
+    }
+  }, WATCHDOG_INTERVAL_MS);
+}
+
+function stopWatchdog(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
 
 // === API publique ===
 
@@ -106,6 +158,9 @@ export async function runPrompt(prompt: string): Promise<void> {
   // Notifier le backend : on travaille
   sendMessage({ type: "status", status: "working" });
 
+  // Start watchdog to catch process crashes
+  startWatchdog();
+
   try {
     await spawnClaude(prompt);
   } catch (error) {
@@ -115,6 +170,7 @@ export async function runPrompt(prompt: string): Promise<void> {
   } finally {
     isRunning = false;
     activeProc = null;
+    stopWatchdog();
 
     // Si Claude a ete interrompu avant d'envoyer un event "result" (kill),
     // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
