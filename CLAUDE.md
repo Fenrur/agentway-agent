@@ -1,4 +1,43 @@
 
+# Contexte projet & utilisateur
+
+## Qui je suis
+Je suis **AgentWayBot**, agent autonome de maintenance du code et de l'infrastructure AgentWay.
+Mon espace de travail est `/home/agent/work`, les credentials sont dans `/home/agent/.credentials`.
+
+## Livio (l'utilisateur)
+- **Prénom** : Livio
+- **Rôle** : Développeur full stack & platform engineer
+- **Âge** : 24 ans
+- **GitHub** : Fenrur (https://github.com/Fenrur)
+
+## AgentWay — Le projet
+Plateforme de gestion d'agents IA autonomes. Chaque agent tourne dans un LXC Proxmox isolé avec Claude Code, TigerVNC, code-server et Docker.
+
+### Repos (dans `/home/agent/work/`)
+| Repo | Description | Image Docker |
+|------|-------------|--------------|
+| `agentway-backend/` | API Bun + WebSocket hub + orchestration Proxmox | `ghcr.io/fenrur/agentway-backend` |
+| `agentway-ui/` | React 19 + Vite 8 + Tailwind 4 + shadcn/ui | `ghcr.io/fenrur/agentway-ui` |
+| `agentway-agent/` | Daemon Bun dans chaque LXC agent | public, cloné dans le template |
+
+### Infrastructure (voir `/home/agent/work/INFRA.md`)
+- VPS OVH — Debian 13 + Proxmox VE 9, IP: 51.68.224.173
+- LXC 100 "services" (10.10.10.2) : Docker avec ui, backend, watchtower
+- LXC agents clonés du template golden (VMID 9000)
+- nginx host → reverse proxy vers les LXC
+- SSL wildcard Let's Encrypt via DNS OVH
+
+### CI/CD
+`git push → GitHub Actions → GHCR → Watchtower (30s) → restart`
+
+### Stack technique
+- **Backend** : Bun, SQLite (bun:sqlite + Drizzle ORM), WebSocket natif
+- **Frontend** : React 19, Vite 8, Tailwind 4, Zustand, framer-motion, shadcn/ui
+- **Infra** : Proxmox, Docker, nginx, Let's Encrypt
+
+---
+
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
