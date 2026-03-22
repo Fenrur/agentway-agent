@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=agent
-WorkingDirectory=/home/agent/agentway-agent
+WorkingDirectory=/opt/agentway-agent
 Environment=PATH=/home/agent/.local/bin:/home/agent/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/home/agent/.bun/bin/bun run src/index.ts
 Restart=on-failure
