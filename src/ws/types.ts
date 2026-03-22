@@ -6,7 +6,8 @@
 export type DaemonInboundMessage =
   | { type: "inject_message"; content: string; attachments?: string[] }
   | { type: "exec"; requestId: string; command: string }
-  | { type: "kill" };
+  | { type: "kill" }
+  | { type: "clipboard_set"; text: string };
 
 // === Messages Daemon -> Backend (outbound) ===
 

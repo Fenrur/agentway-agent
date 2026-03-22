@@ -22,6 +22,10 @@ export function handleInboundMessage(msg: DaemonInboundMessage): void {
       handleKill();
       break;
 
+    case "clipboard_set":
+      handleClipboardSet(msg.text);
+      break;
+
     default: {
       // Exhaustive check — compile error si un type est oublie
       const _exhaustive: never = msg;
@@ -120,5 +124,28 @@ function handleKill(): void {
   const killed = killActive();
   if (!killed) {
     console.log("[handlers] No active Claude Code process to kill");
+  }
+}
+
+/**
+ * Set the X11 clipboard via xclip.
+ * Runs independently of exec (no concurrency guard) so it works
+ * even while Claude Code is running.
+ */
+async function handleClipboardSet(text: string): Promise<void> {
+  try {
+    const proc = Bun.spawn(
+      ["bash", "-c", `DISPLAY=:1 XAUTHORITY=$HOME/.Xauthority xclip -selection clipboard`],
+      { stdin: new TextEncoder().encode(text), stdout: "pipe", stderr: "pipe" },
+    );
+    await proc.exited;
+    if (proc.exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text();
+      console.warn(`[handlers] clipboard_set failed: ${stderr}`);
+    } else {
+      console.log(`[handlers] clipboard_set: ${text.length} chars`);
+    }
+  } catch (err) {
+    console.error("[handlers] clipboard_set error:", err);
   }
 }
