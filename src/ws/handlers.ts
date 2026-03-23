@@ -42,18 +42,36 @@ export function handleInboundMessage(msg: DaemonInboundMessage): void {
 function handleInjectMessage(content: string, attachments?: string[]): void {
   console.log(`[handlers] inject_message received (content length: ${content.length}, attachments: ${attachments?.length ?? 0})`);
 
-  // /new — intercept: kill active process, clear session, start fresh
+  const cmd = content.trim();
+
+  // Blocked slash commands — not available in AgentWay
+  const blockedCommands = ["/clear", "/resume", "/fork"];
+  if (blockedCommands.includes(cmd)) {
+    console.log(`[handlers] Blocked command: ${cmd}`);
+    sendMessage({
+      type: "stream_event",
+      event: {
+        type: "result",
+        result: `La commande ${cmd} n'est pas disponible dans AgentWay.`,
+        is_error: true,
+      },
+    });
+    sendMessage({ type: "status", status: "active" });
+    return;
+  }
+
+  // /reload — kill active process, clear session, start fresh
   // Claude Code's session memory auto-saves summaries, so a new session
   // will automatically load past context. MCPs are reloaded on fresh start.
-  if (content.trim() === "/new") {
-    console.log("[handlers] /new command received — resetting session");
+  if (cmd === "/reload") {
+    console.log("[handlers] /reload command received — resetting session");
     killActive();
     clearSession().then(() => {
       sendMessage({
         type: "stream_event",
         event: {
           type: "result",
-          result: "Session reset. La prochaine commande démarrera une nouvelle conversation avec les MCPs rechargés.",
+          result: "Session rechargée. La prochaine commande démarrera une nouvelle conversation avec les MCPs rechargés.",
           is_error: false,
         },
       });
