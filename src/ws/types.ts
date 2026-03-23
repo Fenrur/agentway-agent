@@ -18,6 +18,8 @@ export type DaemonOutboundMessage =
   | { type: "auth_link"; url: string }
   | { type: "skills_update"; skills: Array<{ name: string; description: string; source: string }> }
   | { type: "exec_result"; requestId: string; stdout: string; stderr: string; exitCode: number }
+  | { type: "persona_update"; name: string | null; emoji: string | null }
+  | { type: "onboarding_completed" }
   | { type: "error"; code: string; message: string };
 
 // === Union ===

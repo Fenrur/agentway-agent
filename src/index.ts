@@ -5,6 +5,7 @@
 import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
+import { startPersonaWatcher } from "./persona/watcher.ts";
 import { killActive } from "./claude/runner.ts";
 
 console.log(`agentway-agent daemon started`);
@@ -15,6 +16,9 @@ connect(config.backendWsUrl, config.daemonToken);
 
 // Start watching for skills/commands changes
 startSkillsWatcher();
+
+// Start watching for persona file changes (.agent/IDENTITY.md, BOOTSTRAP.md)
+startPersonaWatcher();
 
 // Gerer l'arret propre (SIGTERM de systemd, SIGINT de Ctrl+C)
 function gracefulShutdown(signal: string) {
