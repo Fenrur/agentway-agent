@@ -6,15 +6,9 @@ import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
 import { killActive } from "./claude/runner.ts";
-import { clearSession } from "./claude/session.ts";
 
 console.log(`agentway-agent daemon started`);
 console.log(`Backend WebSocket URL: ${config.backendWsUrl}`);
-
-// Clear session on daemon start so Claude Code starts fresh
-// and reloads MCP configs. Conversation history is preserved
-// in Claude Code's project storage, only the live session resets.
-await clearSession();
 
 // Connecter le WebSocket client au backend
 connect(config.backendWsUrl, config.daemonToken);
