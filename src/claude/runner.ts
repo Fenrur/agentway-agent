@@ -106,35 +106,24 @@ export function isBusy(): boolean {
 export function killActive(): boolean {
   if (!activeProc) return false;
 
-  console.log("[runner] Interrupting active Claude Code process (SIGINT)...");
+  console.log("[runner] Killing active Claude Code process...");
   const proc = activeProc;
 
-  // Send SIGINT first — Claude Code handles this gracefully and returns a result
+  // Cancel reader immediately to unblock readNdjsonStream
+  try { activeReader?.cancel(); } catch {}
+
+  // SIGKILL immediately — Claude Code in -p mode doesn't handle SIGINT/SIGTERM gracefully.
+  // Session is preserved via --continue flag on next run (no session ID needed).
   try {
-    proc.kill("SIGINT");
+    proc.kill("SIGKILL");
   } catch {
     // Process already dead
   }
 
-  // SIGTERM after grace period if SIGINT didn't work
+  // Fallback SIGKILL in case the first one didn't work
   setTimeout(() => {
     try {
-      if (proc.exitCode === null) {
-        console.log("[runner] SIGINT didn't stop process, sending SIGTERM...");
-        // Cancel reader to unblock readNdjsonStream
-        try { activeReader?.cancel(); } catch {}
-        proc.kill("SIGTERM");
-      }
-    } catch {}
-  }, SIGKILL_GRACE_MS);
-
-  // SIGKILL as last resort
-  setTimeout(() => {
-    try {
-      if (proc.exitCode === null) {
-        console.log("[runner] SIGTERM didn't stop process, sending SIGKILL...");
-        proc.kill("SIGKILL");
-      }
+      if (proc.exitCode === null) proc.kill("SIGKILL");
     } catch {}
   }, SIGKILL_GRACE_MS);
 
@@ -215,11 +204,14 @@ async function spawnClaude(prompt: string): Promise<void> {
     "--include-partial-messages",
   ];
 
-  // Charger la session existante pour --resume
+  // Continue the most recent session in the working directory.
+  // Uses --continue instead of --resume <id> so we don't need to track session IDs.
+  // After a kill (SIGKILL), the session is preserved on disk by Claude Code
+  // and --continue automatically picks it up.
   const existingSessionId = await loadSession();
   if (existingSessionId) {
-    args.push("--resume", existingSessionId);
-    console.log(`[runner] Resuming session ${existingSessionId.slice(0, 8)}...`);
+    args.push("--continue");
+    console.log(`[runner] Continuing most recent session...`);
   } else {
     console.log("[runner] Starting new Claude Code session");
   }
