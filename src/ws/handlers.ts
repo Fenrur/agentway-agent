@@ -3,6 +3,7 @@
 
 import type { DaemonInboundMessage } from "./types.ts";
 import { runPrompt, killActive } from "../claude/runner.ts";
+import { clearSession } from "../claude/session.ts";
 import { sendMessage } from "./client.ts";
 
 /**
@@ -41,8 +42,26 @@ export function handleInboundMessage(msg: DaemonInboundMessage): void {
 function handleInjectMessage(content: string, attachments?: string[]): void {
   console.log(`[handlers] inject_message received (content length: ${content.length}, attachments: ${attachments?.length ?? 0})`);
 
-  // TODO: gerer les attachments (les convertir en chemins de fichiers dans le prompt)
-  // Pour l'instant, on passe juste le content textuel au runner.
+  // /new — intercept: kill active process, clear session, start fresh
+  // Claude Code's session memory auto-saves summaries, so a new session
+  // will automatically load past context. MCPs are reloaded on fresh start.
+  if (content.trim() === "/new") {
+    console.log("[handlers] /new command received — resetting session");
+    killActive();
+    clearSession().then(() => {
+      sendMessage({
+        type: "stream_event",
+        event: {
+          type: "result",
+          result: "Session reset. La prochaine commande démarrera une nouvelle conversation avec les MCPs rechargés.",
+          is_error: false,
+        },
+      });
+      sendMessage({ type: "status", status: "active" });
+    });
+    return;
+  }
+
   let prompt = content;
   if (attachments && attachments.length > 0) {
     // Filter attachment paths to prevent path traversal
