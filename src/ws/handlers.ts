@@ -60,23 +60,27 @@ function handleInjectMessage(content: string, attachments?: string[]): void {
     return;
   }
 
-  // /reload — kill active process, clear session, start fresh
-  // Claude Code's session memory auto-saves summaries, so a new session
-  // will automatically load past context. MCPs are reloaded on fresh start.
+  // /reload — restart the entire daemon via systemctl.
+  // This triggers the full flow: daemon connect → ensures (re-merge MCPs) → active.
+  // Claude Code starts fresh with all MCPs loaded.
   if (cmd === "/reload") {
-    console.log("[handlers] /reload command received — resetting session");
+    console.log("[handlers] /reload command received — restarting daemon via systemctl");
     killActive();
-    clearSession().then(() => {
-      sendMessage({
-        type: "stream_event",
-        event: {
-          type: "result",
-          result: "Session rechargée. La prochaine commande démarrera une nouvelle conversation avec les MCPs rechargés.",
-          is_error: false,
-        },
-      });
-      sendMessage({ type: "status", status: "active" });
+    sendMessage({
+      type: "stream_event",
+      event: {
+        type: "result",
+        result: "Rechargement en cours... Le daemon redémarre.",
+        is_error: false,
+      },
     });
+    // Restart via systemctl — faster than exit + RestartSec wait
+    setTimeout(() => {
+      Bun.spawn(["sudo", "systemctl", "restart", "agentway-agent"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    }, 500);
     return;
   }
 
