@@ -95,33 +95,47 @@ export function isBusy(): boolean {
 }
 
 /**
- * Tue le processus Claude Code en cours.
- * Envoie SIGTERM puis SIGKILL apres un delai de grace.
- * Retourne true si un processus a ete tue.
+ * Interrompt le processus Claude Code en cours.
+ *
+ * Strategy: SIGINT → SIGTERM → SIGKILL (escalation)
+ * - SIGINT: Claude Code interprets this as "stop current task" (like Esc/Ctrl+C)
+ *   and returns a result event gracefully, preserving the session.
+ * - SIGTERM: If SIGINT didn't work after 5s, force terminate.
+ * - SIGKILL: Last resort after another 5s.
  */
 export function killActive(): boolean {
   if (!activeProc) return false;
 
-  console.log("[runner] Killing active Claude Code process...");
+  console.log("[runner] Interrupting active Claude Code process (SIGINT)...");
   const proc = activeProc;
 
-  // Annuler le reader stdout immediatement pour debloquer readNdjsonStream
-  // (sinon reader.read() reste bloque jusqu'au SIGKILL 5s plus tard)
-  try { activeReader?.cancel(); } catch {}
-
+  // Send SIGINT first — Claude Code handles this gracefully and returns a result
   try {
-    proc.kill("SIGTERM");
+    proc.kill("SIGINT");
   } catch {
-    // Processus deja mort
+    // Process already dead
   }
 
-  // SIGKILL apres la grace period
+  // SIGTERM after grace period if SIGINT didn't work
   setTimeout(() => {
     try {
-      proc.kill("SIGKILL");
-    } catch {
-      // Deja mort
-    }
+      if (proc.exitCode === null) {
+        console.log("[runner] SIGINT didn't stop process, sending SIGTERM...");
+        // Cancel reader to unblock readNdjsonStream
+        try { activeReader?.cancel(); } catch {}
+        proc.kill("SIGTERM");
+      }
+    } catch {}
+  }, SIGKILL_GRACE_MS);
+
+  // SIGKILL as last resort
+  setTimeout(() => {
+    try {
+      if (proc.exitCode === null) {
+        console.log("[runner] SIGTERM didn't stop process, sending SIGKILL...");
+        proc.kill("SIGKILL");
+      }
+    } catch {}
   }, SIGKILL_GRACE_MS);
 
   // Note: isRunning is reset in the finally block of runPrompt()
