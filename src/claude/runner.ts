@@ -204,16 +204,23 @@ async function spawnClaude(prompt: string): Promise<void> {
     "--include-partial-messages",
   ];
 
-  // Continue the most recent session in the working directory.
-  // Uses --continue instead of --resume <id> so we don't need to track session IDs.
-  // After a kill (SIGKILL), the session is preserved on disk by Claude Code
-  // and --continue automatically picks it up.
-  const existingSessionId = await loadSession();
-  if (existingSessionId) {
+  // Always use --continue to pick up the most recent session.
+  // This works even after SIGKILL because Claude Code persists sessions to disk.
+  // Only skip --continue on the very first message (no project dir yet).
+  const projectDir = "/home/agent/.claude/projects/-home-agent";
+  let hasExistingSession = false;
+  try {
+    const entries = await import("node:fs/promises").then((fs) => fs.readdir(projectDir));
+    hasExistingSession = entries.some((e) => e.endsWith(".jsonl"));
+  } catch {
+    // Dir doesn't exist = no previous session
+  }
+
+  if (hasExistingSession) {
     args.push("--continue");
-    console.log(`[runner] Continuing most recent session...`);
+    console.log("[runner] Continuing most recent session...");
   } else {
-    console.log("[runner] Starting new Claude Code session");
+    console.log("[runner] Starting new Claude Code session (first message)");
   }
 
   console.log(`[runner] Spawning: claude -p "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
