@@ -212,8 +212,9 @@ async function spawnClaude(prompt: string): Promise<void> {
 
   console.log(`[runner] Spawning: claude -p "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
 
-  // Spawn le processus
+  // Spawn le processus dans le home de l'agent (pas dans /opt/agentway-agent)
   const proc = Bun.spawn(args, {
+    cwd: "/home/agent",
     stdout: "pipe",
     stderr: "pipe",
   });
