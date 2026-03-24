@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
 import { startPersonaWatcher } from "./persona/watcher.ts";
-import { killActive } from "./claude/runner.ts";
+import { killActive, autoResume } from "./claude/runner.ts";
 
 console.log(`agentway-agent daemon started`);
 console.log(`Backend WebSocket URL: ${config.backendWsUrl}`);
@@ -17,13 +17,21 @@ connect(config.backendWsUrl, config.daemonToken);
 // Start watching for skills/commands changes
 startSkillsWatcher();
 
+// Auto-resume interrupted tasks after daemon restart.
+// Wait 15s for WS connection + ensures/migrations to complete before resuming.
+setTimeout(() => {
+  autoResume().catch((err) => {
+    console.error("[daemon] Auto-resume error:", err);
+  });
+}, 15_000);
+
 // Start watching for persona file changes (.agent/IDENTITY.md, BOOTSTRAP.md)
 startPersonaWatcher();
 
 // Gerer l'arret propre (SIGTERM de systemd, SIGINT de Ctrl+C)
 function gracefulShutdown(signal: string) {
   console.log(`[daemon] Received ${signal}, shutting down...`);
-  killActive();
+  killActive(false); // Not user-initiated — keep running_prompt for auto-resume
   disconnect();
   process.exit(0);
 }

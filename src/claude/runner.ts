@@ -39,6 +39,44 @@ let resultReceived = false;
 /** Watchdog timer */
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
+/** File to track the currently running prompt for auto-resume after crash/restart */
+const RUNNING_PROMPT_FILE = "/opt/agentway-agent/running_prompt.json";
+
+/** Save the current prompt so it can be resumed after a crash */
+async function saveRunningPrompt(prompt: string): Promise<void> {
+  try {
+    await Bun.write(RUNNING_PROMPT_FILE, JSON.stringify({ prompt, startedAt: Date.now() }));
+  } catch {}
+}
+
+/** Clear the running prompt (task completed or explicitly killed by user) */
+async function clearRunningPrompt(): Promise<void> {
+  try {
+    const { unlink } = await import("node:fs/promises");
+    await unlink(RUNNING_PROMPT_FILE);
+  } catch {}
+}
+
+/** Load a previously interrupted prompt for auto-resume */
+async function loadInterruptedPrompt(): Promise<string | null> {
+  try {
+    const file = Bun.file(RUNNING_PROMPT_FILE);
+    if (!(await file.exists())) return null;
+    const data = JSON.parse(await file.text());
+    // Only resume if interrupted less than 1 hour ago
+    if (Date.now() - data.startedAt > 60 * 60 * 1000) {
+      await clearRunningPrompt();
+      return null;
+    }
+    return data.prompt;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the current kill was user-initiated (don't auto-resume) */
+let userInitiatedKill = false;
+
 // === Watchdog ===
 
 /**
@@ -95,6 +133,28 @@ export function isBusy(): boolean {
 }
 
 /**
+ * Check for an interrupted prompt and auto-resume it.
+ * Called once at daemon startup after WS connection is established.
+ */
+export async function autoResume(): Promise<void> {
+  const interrupted = await loadInterruptedPrompt();
+  if (!interrupted) return;
+
+  console.log(`[runner] Auto-resuming interrupted task: "${interrupted.slice(0, 80)}..."`);
+  await clearRunningPrompt(); // Clear before resume to avoid infinite retry loops
+
+  // Small delay to let the daemon fully connect
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Resume with --continue (loads session context) + a resume prompt
+  runPrompt(
+    `Tu as été interrompu pendant la tâche suivante. Continue exactement où tu en étais :\n\n${interrupted}`
+  ).catch((err) => {
+    console.error("[runner] Auto-resume failed:", err);
+  });
+}
+
+/**
  * Interrompt le processus Claude Code en cours.
  *
  * Strategy: SIGINT → SIGTERM → SIGKILL (escalation)
@@ -103,10 +163,17 @@ export function isBusy(): boolean {
  * - SIGTERM: If SIGINT didn't work after 5s, force terminate.
  * - SIGKILL: Last resort after another 5s.
  */
-export function killActive(): boolean {
+export function killActive(userKill = true): boolean {
   if (!activeProc) return false;
 
-  console.log("[runner] Killing active Claude Code process...");
+  console.log(`[runner] Killing active Claude Code process (userKill=${userKill})...`);
+  userInitiatedKill = userKill;
+
+  // If user-initiated kill, clear the running prompt so it won't auto-resume
+  if (userKill) {
+    clearRunningPrompt().catch(() => {});
+  }
+
   const proc = activeProc;
 
   // Cancel reader immediately to unblock readNdjsonStream
@@ -157,6 +224,10 @@ export async function runPrompt(prompt: string): Promise<void> {
 
   isRunning = true;
   resultReceived = false;
+  userInitiatedKill = false;
+
+  // Save the prompt so it can be auto-resumed after daemon restart
+  await saveRunningPrompt(prompt);
 
   // Notifier le backend : on travaille
   sendMessage({ type: "status", status: "working" });
@@ -179,6 +250,12 @@ export async function runPrompt(prompt: string): Promise<void> {
     // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
     if (!resultReceived) {
       sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+    }
+
+    // Clear running prompt if task completed normally (result received)
+    // or if user explicitly killed it. Keep it for auto-resume on crash/restart.
+    if (resultReceived || userInitiatedKill) {
+      await clearRunningPrompt();
     }
 
     // Notifier le backend : on est idle
