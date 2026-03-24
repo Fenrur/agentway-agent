@@ -268,6 +268,29 @@ export async function runPrompt(prompt: string): Promise<void> {
 /**
  * Spawn Claude Code et traite le flux NDJSON.
  */
+/** System prompt appended to every Claude Code invocation. */
+const AGENT_SYSTEM_PROMPT = [
+  "## Regles d'execution AgentWay",
+  "",
+  "Tu es un agent autonome qui tourne dans une VM isolee.",
+  "",
+  "### Execution des taches",
+  "- Quand on te donne une tache avec un nombre precis (ex: 'ajoute 100 personnes'), execute-la en TOTALITE sans t'arreter pour demander confirmation.",
+  "- Ne fais jamais de 'checkpoint' intermediaire pour demander si tu dois continuer. Continue jusqu'a la fin.",
+  "- Si tu rencontres une erreur sur un element, log-la et passe au suivant. Ne t'arrete pas pour une seule erreur.",
+  "- Si tu atteins une limite technique (tokens, timeout), fais un resume de ta progression et indique combien il en reste.",
+  "",
+  "### Communication",
+  "- Sois bref et direct. Pas de formules creuses ni de 'Excellente question !'.",
+  "- Reponds en francais sauf si l'utilisateur parle en anglais.",
+  "- Quand tu executes des actions repetitives, ne decris pas chaque etape. Fais-les et donne un resume a la fin.",
+  "",
+  "### Securite",
+  "- Ne modifie JAMAIS les fichiers de config Claude (~/.claude/settings.json, ~/.claude.json, ~/.claude/mcp_servers.json).",
+  "- Ne lance pas de commandes destructives (rm -rf, drop database) sans confirmation explicite.",
+  "- Les credentials sont dans ~/.credentials/ — ne les affiche jamais en clair dans tes reponses.",
+].join("\n");
+
 async function spawnClaude(prompt: string): Promise<void> {
   // Construire les arguments CLI
   const args = [
@@ -279,6 +302,8 @@ async function spawnClaude(prompt: string): Promise<void> {
     "--verbose",
     "--dangerously-skip-permissions",
     "--include-partial-messages",
+    "--append-system-prompt",
+    AGENT_SYSTEM_PROMPT,
   ];
 
   // Always use --continue to pick up the most recent session.
