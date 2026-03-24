@@ -291,7 +291,37 @@ const AGENT_SYSTEM_PROMPT = [
   "- Les credentials sont dans ~/.credentials/ — ne les affiche jamais en clair dans tes reponses.",
 ].join("\n");
 
+/** Read persona files from .agent/ and build a persona system prompt section. */
+async function buildPersonaPrompt(): Promise<string | null> {
+  const AGENT_DIR = "/home/agent/.agent";
+  const files = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"];
+  const sections: string[] = [];
+
+  for (const file of files) {
+    try {
+      const f = Bun.file(`${AGENT_DIR}/${file}`);
+      if (await f.exists()) {
+        const content = await f.text();
+        if (content.trim()) {
+          sections.push(`## ${file}\n\n${content.trim()}`);
+        }
+      }
+    } catch {}
+  }
+
+  if (sections.length === 0) return null;
+  return "# Persona Agent\n\n" + sections.join("\n\n---\n\n");
+}
+
 async function spawnClaude(prompt: string): Promise<void> {
+  // Build system prompt: base rules + optional persona
+  let systemPrompt = AGENT_SYSTEM_PROMPT;
+  const personaPrompt = await buildPersonaPrompt();
+  if (personaPrompt) {
+    systemPrompt = personaPrompt + "\n\n---\n\n" + systemPrompt;
+    console.log("[runner] Persona enabled — injecting persona files into system prompt");
+  }
+
   // Construire les arguments CLI
   const args = [
     "claude",
@@ -303,7 +333,7 @@ async function spawnClaude(prompt: string): Promise<void> {
     "--dangerously-skip-permissions",
     "--include-partial-messages",
     "--append-system-prompt",
-    AGENT_SYSTEM_PROMPT,
+    systemPrompt,
   ];
 
   // Always use --continue to pick up the most recent session.
