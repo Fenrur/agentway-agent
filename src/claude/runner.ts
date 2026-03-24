@@ -223,6 +223,14 @@ async function spawnClaude(prompt: string): Promise<void> {
     console.log("[runner] Starting new Claude Code session (first message)");
   }
 
+  // Kill orphan MCP processes from previous Claude Code sessions.
+  // Claude Code spawns MCP subprocesses (chrome-devtools-mcp, etc.) that
+  // survive SIGKILL and accumulate, leaking ~500MB each.
+  try {
+    Bun.spawnSync(["pkill", "-f", "chrome-devtools-mcp"], { stdout: "ignore", stderr: "ignore" });
+  } catch {}
+
+
   console.log(`[runner] Spawning: claude -p "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
 
   // Spawn le processus dans le home de l'agent (pas dans /opt/agentway-agent)
