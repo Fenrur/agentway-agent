@@ -77,6 +77,15 @@ async function loadInterruptedPrompt(): Promise<string | null> {
 /** Whether the current kill was user-initiated (don't auto-resume) */
 let userInitiatedKill = false;
 
+/** Tracks whether BOOT.md has been injected in this daemon session. */
+let bootInjected = false;
+
+/** Path to BOOT.md checklist file. */
+const BOOT_FILE = "/home/agent/.agent/BOOT.md";
+
+/** Memory flush prompt — sent after task completion to save important facts. */
+const MEMORY_FLUSH_PROMPT = "Sauvegarde les faits importants de cette conversation dans ta memoire claude-mem (smart_search, observations). Resume en 2-3 phrases ce qui s'est passe, les decisions prises, et les informations a retenir pour les prochaines sessions. Sois bref.";
+
 // === Watchdog ===
 
 /**
@@ -258,8 +267,48 @@ export async function runPrompt(prompt: string): Promise<void> {
       await clearRunningPrompt();
     }
 
+    // Memory flush — after normal completion, ask Claude to save important facts
+    // to claude-mem. Silent fire-and-forget, doesn't block the user.
+    if (resultReceived && !userInitiatedKill) {
+      memoryFlush().catch((err) => {
+        console.warn("[runner] Memory flush failed:", err);
+      });
+    }
+
     // Notifier le backend : on est idle
     sendMessage({ type: "status", status: "idle" });
+  }
+}
+
+/**
+ * Memory flush — silently ask Claude to save important facts from the
+ * conversation into claude-mem. Fire-and-forget, doesn't stream to UI.
+ */
+async function memoryFlush(): Promise<void> {
+  console.log("[runner] Memory flush — saving conversation facts to claude-mem...");
+
+  try {
+    const proc = Bun.spawn([
+      "claude",
+      "-p",
+      MEMORY_FLUSH_PROMPT,
+      "--continue",
+      "--dangerously-skip-permissions",
+      "--output-format", "json",
+      "--max-turns", "3",
+    ], {
+      cwd: "/home/agent",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    // Kill orphan MCP processes first
+    try { Bun.spawnSync(["pkill", "-f", "chrome-devtools-mcp"], { stdout: "ignore", stderr: "ignore" }); } catch {}
+
+    const exitCode = await proc.exited;
+    console.log(`[runner] Memory flush completed (exit ${exitCode})`);
+  } catch (err) {
+    console.warn("[runner] Memory flush error:", err);
   }
 }
 
@@ -270,7 +319,7 @@ export async function runPrompt(prompt: string): Promise<void> {
  */
 /** System prompt appended to every Claude Code invocation. */
 const AGENT_SYSTEM_PROMPT = [
-  "## Regles d'execution AgentWay",
+  "## Regles d'execution",
   "",
   "Tu es un agent autonome qui tourne dans une VM isolee.",
   "",
@@ -322,11 +371,27 @@ async function spawnClaude(prompt: string): Promise<void> {
     console.log("[runner] Persona enabled — injecting persona files into system prompt");
   }
 
+  // BOOT.md — inject once per daemon session as prefix to the first prompt
+  let finalPrompt = prompt;
+  if (!bootInjected) {
+    try {
+      const bootFile = Bun.file(BOOT_FILE);
+      if (await bootFile.exists()) {
+        const bootContent = (await bootFile.text()).trim();
+        if (bootContent) {
+          finalPrompt = `[Instructions de demarrage]\n${bootContent}\n\n[Message utilisateur]\n${prompt}`;
+          console.log("[runner] BOOT.md injected into first prompt");
+        }
+      }
+    } catch {}
+    bootInjected = true;
+  }
+
   // Construire les arguments CLI
   const args = [
     "claude",
     "-p",
-    prompt,
+    finalPrompt,
     "--output-format",
     "stream-json",
     "--verbose",
