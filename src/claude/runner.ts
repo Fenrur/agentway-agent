@@ -83,6 +83,9 @@ let lastResultText = "";
 /** Whether the last event before result was a tool call (indicates premature stop). */
 let lastEventWasToolCall = false;
 
+/** Count of non-result events in the current run (to detect empty vs content sessions). */
+let eventCount = 0;
+
 /** Max auto-continue iterations to prevent infinite loops. */
 const MAX_AUTO_CONTINUES = 10;
 
@@ -248,6 +251,7 @@ export async function runPrompt(prompt: string): Promise<void> {
   userInitiatedKill = false;
   lastResultText = "";
   lastEventWasToolCall = false;
+  eventCount = 0;
   autoContinueCount = 0;
 
   // Save the prompt so it can be auto-resumed after daemon restart
@@ -284,7 +288,10 @@ export async function runPrompt(prompt: string): Promise<void> {
     // Detect if the task seems incomplete — Claude often says things like
     // "je vais continuer", "voici les X premiers", "je m'arrête ici", etc.
     const needsContinue = detectIncompleteTask(lastResultText);
-    if (!needsContinue) break;
+    if (!needsContinue) {
+      console.log(`[runner] Task appears complete — lastEventWasToolCall=${lastEventWasToolCall}, resultText=${lastResultText.slice(0, 100) || "(empty)"}`);
+      break;
+    }
 
     // Auto-continue: re-invoke with --continue
     autoContinueCount++;
@@ -292,6 +299,7 @@ export async function runPrompt(prompt: string): Promise<void> {
     resultReceived = false;
     lastResultText = "";
     lastEventWasToolCall = false;
+    eventCount = 0;
     currentPrompt = "Continue exactement ou tu en etais. Ne repete pas ce que tu as deja fait. Continue la tache.";
   }
 
@@ -329,10 +337,10 @@ export async function runPrompt(prompt: string): Promise<void> {
  * Returns true if the result text suggests the task is incomplete.
  */
 function detectIncompleteTask(resultText: string): boolean {
-  // If the last event before result was a tool call and result text is empty,
-  // Claude stopped mid-task without writing a conclusion → needs continue
-  if (lastEventWasToolCall && !resultText.trim()) {
-    console.log("[runner] Detected premature stop: last event was tool call, no conclusion text");
+  // If result text is empty but there were many events, Claude stopped mid-task
+  // without writing a conclusion. This happens when hitting the tool-call limit.
+  if (!resultText.trim() && eventCount >= 5) {
+    console.log(`[runner] Detected premature stop: empty result after ${eventCount} events`);
     return true;
   }
 
@@ -618,10 +626,12 @@ function processNdjsonLine(line: string): void {
   // Forward l'event brut au backend
   sendMessage({ type: "stream_event", event });
 
-  // Track if this event is a tool call (for auto-continue detection)
+  // Track event types for auto-continue detection
   const evType = event.type as string | undefined;
   if (evType && evType !== "result") {
-    // tool_use, tool_result, assistant with tool calls = tool event
+    eventCount++;
+    // Claude Code NDJSON wraps tool calls inside "assistant" events with content blocks,
+    // and "user" events with tool_result blocks. Also detect direct tool_use/tool_result types.
     lastEventWasToolCall = evType === "tool_use" || evType === "tool_result" ||
       (evType === "assistant" && Array.isArray((event as any).message?.content) &&
         (event as any).message.content.some((b: any) => b.type === "tool_use" || b.type === "tool_result"));
