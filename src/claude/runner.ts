@@ -36,7 +36,7 @@ const MAX_AUTO_CONTINUES = 10;
 
 // === File paths ===
 
-const BOOT_FILE = "/home/agent/.agent/BOOT.md";
+const BOOT_FILE = "/home/agent/.agent/BOOTSTRAP.md";
 const CLAUDE_MD_FILE = "/home/agent/CLAUDE.md";
 const RUNNING_PROMPT_FILE = "/home/agent/.agentway-running-prompt.json";
 
@@ -73,7 +73,7 @@ let lastResultIsError = false;
 /** Current auto-continue count */
 let autoContinueCount = 0;
 
-/** Tracks whether BOOT.md has been injected in this session */
+/** Tracks whether BOOTSTRAP.md has been injected in this session */
 let bootInjected = false;
 
 // === System prompt ===
@@ -100,9 +100,8 @@ const AGENT_SYSTEM_PROMPT = [
   "  - `IDENTITY.md` — ton nom, emoji, description visible par l'utilisateur",
   "  - `USER.md` — informations sur l'utilisateur (prenom, preferences)",
   "  - `AGENTS.md` — les autres agents que tu connais",
-  "  - `TOOLS.md` — outils et integrations disponibles",
   "  - `MEMORY.md` — notes persistantes a relire et mettre a jour",
-  "  - `BOOT.md` — checklist de demarrage (executee au premier message)",
+  "  - `BOOTSTRAP.md` — checklist de demarrage (executee au premier message, supprimee ensuite)",
   "- Tu peux lire et modifier ces fichiers pour mettre a jour ta memoire ou ta persona.",
   "- Si le dossier `~/.agent/` n'existe pas, tu n'as pas de persona — reponds normalement.",
   "",
@@ -115,7 +114,7 @@ const AGENT_SYSTEM_PROMPT = [
 /** Read persona files from .agent/ and build a persona system prompt section. */
 async function buildPersonaPrompt(): Promise<string | null> {
   const AGENT_DIR = "/home/agent/.agent";
-  const files = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"];
+  const files = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "MEMORY.md"];
   const sections: string[] = [];
 
   for (const file of files) {
@@ -336,7 +335,7 @@ export async function runPrompt(prompt: string): Promise<void> {
 
   let currentPrompt = prompt;
 
-  // BOOT.md — inject once per session as prefix to the first prompt
+  // BOOTSTRAP.md — inject once per session as prefix to the first prompt
   if (!bootInjected) {
     try {
       const bootFile = Bun.file(BOOT_FILE);
@@ -344,7 +343,7 @@ export async function runPrompt(prompt: string): Promise<void> {
         const bootContent = (await bootFile.text()).trim();
         if (bootContent) {
           currentPrompt = `[Instructions de demarrage]\n${bootContent}\n\n[Message utilisateur]\n${prompt}`;
-          console.log("[runner] BOOT.md injected into first prompt");
+          console.log("[runner] BOOTSTRAP.md injected into first prompt");
         }
       }
     } catch {}
