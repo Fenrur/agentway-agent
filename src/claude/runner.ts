@@ -310,6 +310,17 @@ export async function runPrompt(prompt: string): Promise<void> {
     return;
   }
 
+  // If a memory flush is running in background, abort it so we can use the session
+  if (isMemoryFlushing) {
+    console.log("[runner] Aborting background memory flush for new message");
+    streamAborted = true;
+    // Wait for flush to release the session (max 2s)
+    const start = Date.now();
+    while (isMemoryFlushing && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
   isRunning = true;
   resultReceived = false;
   userInitiatedInterrupt = false;
@@ -394,16 +405,17 @@ export async function runPrompt(prompt: string): Promise<void> {
     await clearRunningPrompt();
   }
 
-  // Memory flush after normal completion — await with timeout before going idle
-  if (resultReceived && !userInitiatedInterrupt) {
-    await Promise.race([
-      memoryFlush(),
-      new Promise((r) => setTimeout(r, MEMORY_FLUSH_TIMEOUT_MS)),
-    ]);
-  }
-
+  // Go idle BEFORE memory flush — don't block user messages during flush.
+  // The flush uses a separate guard (isMemoryFlushing) to serialize with the next runPrompt.
   isRunning = false;
   sendMessage({ type: "status", status: "idle" });
+
+  // Memory flush after normal completion — fire-and-forget, runs in background
+  if (resultReceived && !userInitiatedInterrupt) {
+    memoryFlush().catch((err) => {
+      console.warn("[runner] Memory flush failed:", err);
+    });
+  }
 }
 
 // === Stream execution ===
