@@ -86,6 +86,9 @@ let lastEventWasToolCall = false;
 /** Count of non-result events in the current run (to detect empty vs content sessions). */
 let eventCount = 0;
 
+/** Whether the last result was an error (don't auto-continue on errors). */
+let lastResultIsError = false;
+
 /** Max auto-continue iterations to prevent infinite loops. */
 const MAX_AUTO_CONTINUES = 10;
 
@@ -251,6 +254,7 @@ export async function runPrompt(prompt: string): Promise<void> {
   userInitiatedKill = false;
   lastResultText = "";
   lastEventWasToolCall = false;
+  lastResultIsError = false;
   eventCount = 0;
   autoContinueCount = 0;
 
@@ -287,9 +291,10 @@ export async function runPrompt(prompt: string): Promise<void> {
 
     // Detect if the task seems incomplete — Claude often says things like
     // "je vais continuer", "voici les X premiers", "je m'arrête ici", etc.
-    const needsContinue = detectIncompleteTask(lastResultText);
+    // Don't auto-continue on error results
+    const needsContinue = !lastResultIsError && detectIncompleteTask(lastResultText);
     if (!needsContinue) {
-      console.log(`[runner] Task appears complete — lastEventWasToolCall=${lastEventWasToolCall}, resultText=${lastResultText.slice(0, 100) || "(empty)"}`);
+      console.log(`[runner] Task appears complete — isError=${lastResultIsError}, events=${eventCount}, resultText=${lastResultText.slice(0, 100) || "(empty)"}`);
       break;
     }
 
@@ -299,6 +304,7 @@ export async function runPrompt(prompt: string): Promise<void> {
     resultReceived = false;
     lastResultText = "";
     lastEventWasToolCall = false;
+    lastResultIsError = false;
     eventCount = 0;
     currentPrompt = "Continue exactement ou tu en etais. Ne repete pas ce que tu as deja fait. Continue la tache.";
   }
@@ -349,21 +355,21 @@ function detectIncompleteTask(resultText: string): boolean {
 
   // Patterns that suggest Claude stopped mid-task
   const incompletePatterns = [
-    // French
-    "je continue", "je vais continuer", "je poursuis",
-    "voici les premiers", "voici les .* premiers",
+    // French — intent to continue / stopped mid-task
+    "je vais continuer", "je poursuis",
+    "voici les .* premiers",
     "je m'arrete ici", "je m'arrête ici",
     "voulez-vous que je continue", "veux-tu que je continue",
-    "dois-je continuer", "on continue",
-    "suite au prochain", "la suite",
+    "dois-je continuer",
+    "suite au prochain",
     "il en reste", "il reste encore",
     "je n'ai pas encore fini", "pas encore termine",
     "j'ai fait .* sur", "j'ai traite .* sur",
-    // English
+    // English — intent to continue / stopped mid-task
     "i'll continue", "shall i continue", "should i continue",
     "want me to continue", "let me continue",
     "here are the first", "i've done .* out of",
-    "remaining", "i stopped", "i'll proceed",
+    "i stopped", "i'll proceed",
   ];
 
   return incompletePatterns.some((pattern) => {
@@ -641,6 +647,7 @@ function processNdjsonLine(line: string): void {
   if (event.type === "result") {
     resultReceived = true;
     lastResultText = typeof event.result === "string" ? event.result : "";
+    lastResultIsError = Boolean((event as Record<string, unknown>).is_error);
   }
 
   // Extraire le session ID de l'event "result"
