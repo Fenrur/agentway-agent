@@ -16,15 +16,10 @@ if [ ! -f "$SDK_FILE" ]; then
   exit 0
 fi
 
-# Check if already patched
-if grep -q 'includePartialMessages:!0' "$SDK_FILE" 2>/dev/null; then
+# Check if already patched (all 3 patches applied)
+if grep -q 'includePartialMessages:!0' "$SDK_FILE" 2>/dev/null && \
+   grep -q 'settingSources:void 0' "$SDK_FILE" 2>/dev/null; then
   echo "[patch-sdk] Already patched — skipping"
-  exit 0
-fi
-
-# Verify patterns exist before patching
-if ! grep -q 'includePartialMessages:!1' "$SDK_FILE"; then
-  echo "[patch-sdk] WARNING: includePartialMessages:!1 not found — SDK may have changed"
   exit 0
 fi
 
@@ -32,8 +27,9 @@ fi
 sed -i.bak \
   -e 's/includePartialMessages:!1/includePartialMessages:!0/g' \
   -e 's/allowDangerouslySkipPermissions:!1/allowDangerouslySkipPermissions:!0/g' \
+  -e 's/settingSources:\[\]/settingSources:void 0/g' \
   "$SDK_FILE"
 
 rm -f "${SDK_FILE}.bak"
 
-echo "[patch-sdk] Patched SDK V2: includePartialMessages=true, allowDangerouslySkipPermissions=true"
+echo "[patch-sdk] Patched SDK V2: includePartialMessages=true, allowDangerouslySkipPermissions=true, settingSources=default"
