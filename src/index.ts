@@ -6,10 +6,13 @@ import { config } from "./config.ts";
 import { connect, disconnect } from "./ws/client.ts";
 import { startSkillsWatcher } from "./skills/watcher.ts";
 import { startPersonaWatcher } from "./persona/watcher.ts";
-import { killActive, autoResume } from "./claude/runner.ts";
+import { initRunner, autoResume, closeSession, interruptCurrent } from "./claude/runner.ts";
 
 console.log(`agentway-agent daemon started`);
 console.log(`Backend WebSocket URL: ${config.backendWsUrl}`);
+
+// Initialize the runner (sets cwd, writes CLAUDE.md system prompt)
+await initRunner();
 
 // Connecter le WebSocket client au backend
 connect(config.backendWsUrl, config.daemonToken);
@@ -31,7 +34,8 @@ startPersonaWatcher();
 // Gerer l'arret propre (SIGTERM de systemd, SIGINT de Ctrl+C)
 function gracefulShutdown(signal: string) {
   console.log(`[daemon] Received ${signal}, shutting down...`);
-  killActive(false); // Not user-initiated — keep running_prompt for auto-resume
+  interruptCurrent(false); // Not user-initiated — keep running_prompt for auto-resume
+  closeSession(); // Clean SDK session close
   disconnect();
   process.exit(0);
 }

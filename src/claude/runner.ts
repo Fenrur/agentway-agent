@@ -1,424 +1,85 @@
 // src/claude/runner.ts
-// Coeur du daemon : spawn Claude Code CLI, capture stdout NDJSON,
-// detecte le lien d'auth, forward les events au backend.
+// Coeur du daemon : session SDK V2 persistante, forward events au backend.
+// Remplace l'ancien pattern Bun.spawn + NDJSON par une session multi-turn.
 //
-// Pattern inspire de ClaudeClaw runner.ts :
-//   Bun.spawn + proc.stdout.getReader() + NDJSON parsing line par line.
+// Architecture :
+//   - Une seule session SDK V2 par daemon (creee au premier message, resumee au restart)
+//   - send() + stream() au lieu de spawn() un process par message
+//   - interruptCurrent() break le for-await au lieu de SIGKILL
+//   - Les events SDK ont le meme format que le CLI NDJSON (assistant, user, result, system, stream_event)
 
+import {
+  unstable_v2_createSession,
+  unstable_v2_resumeSession,
+  type SDKMessage,
+  type SDKSession,
+} from "@anthropic-ai/claude-agent-sdk";
 import { sendMessage } from "../ws/client.ts";
-import { loadSession, saveSession } from "./session.ts";
+import { loadSession, saveSession, clearSession } from "./session.ts";
 
 // === Constantes ===
 
-/** Grace period entre SIGTERM et SIGKILL (ms) */
-const SIGKILL_GRACE_MS = 5_000;
-
-/** Maximum execution time for a single Claude Code run (30 minutes) */
-const MAX_RUNTIME_MS = 30 * 60 * 1000;
+/** Maximum execution time for a single turn (30 minutes) */
+const MAX_TURN_MS = 30 * 60 * 1000;
 
 /** Pattern pour detecter un lien d'auth dans le texte */
 const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s"'<>]*/i;
 
-/** Watchdog interval: check every 5s if the process died without cleanup */
-const WATCHDOG_INTERVAL_MS = 5_000;
+/** Max auto-continue iterations to prevent infinite loops */
+const MAX_AUTO_CONTINUES = 10;
+
+/** Memory flush prompt */
+const MEMORY_FLUSH_PROMPT = "Sauvegarde les faits importants de cette conversation dans ta memoire claude-mem (smart_search, observations). Resume en 2-3 phrases ce qui s'est passe, les decisions prises, et les informations a retenir pour les prochaines sessions. Sois bref.";
+
+/** Memory flush timeout (15s) */
+const MEMORY_FLUSH_TIMEOUT_MS = 15_000;
+
+// === File paths ===
+
+const BOOT_FILE = "/home/agent/.agent/BOOT.md";
+const CLAUDE_MD_FILE = "/home/agent/CLAUDE.md";
+const RUNNING_PROMPT_FILE = "/home/agent/.agentway-running-prompt.json";
 
 // === State ===
 
-/** Process Claude Code en cours d'execution */
-let activeProc: ReturnType<typeof Bun.spawn> | null = null;
+/** SDK V2 persistent session */
+let session: SDKSession | null = null;
 
-/** Lecteur stdout actif — annule immediatement lors du kill */
-let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-
-/** Indique si le runner est en train de traiter un message */
+/** True for the entire runPrompt lifecycle (includes auto-continue + memory flush) */
 let isRunning = false;
 
-/** Indique si un event "result" a ete recu pendant le run courant */
+/** True while actively iterating a stream() response */
+let isStreaming = false;
+
+/** Flag to gracefully abort the current stream */
+let streamAborted = false;
+
+/** True when running a silent memory flush (don't forward events to UI) */
+let isMemoryFlushing = false;
+
+/** True if a "result" event was received during the current turn */
 let resultReceived = false;
 
-/** Watchdog timer */
-let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+/** Whether the current interrupt was user-initiated */
+let userInitiatedInterrupt = false;
 
-/** File to track the currently running prompt for auto-resume after crash/restart */
-const RUNNING_PROMPT_FILE = "/home/agent/.agentway-running-prompt.json";
-
-/** Save the current prompt so it can be resumed after a crash */
-async function saveRunningPrompt(prompt: string): Promise<void> {
-  try {
-    await Bun.write(RUNNING_PROMPT_FILE, JSON.stringify({ prompt, startedAt: Date.now() }));
-  } catch {}
-}
-
-/** Clear the running prompt (task completed or explicitly killed by user) */
-async function clearRunningPrompt(): Promise<void> {
-  try {
-    const { unlink } = await import("node:fs/promises");
-    await unlink(RUNNING_PROMPT_FILE);
-  } catch {}
-}
-
-/** Load a previously interrupted prompt for auto-resume */
-async function loadInterruptedPrompt(): Promise<string | null> {
-  try {
-    const file = Bun.file(RUNNING_PROMPT_FILE);
-    if (!(await file.exists())) return null;
-    const data = JSON.parse(await file.text());
-    // Only resume if interrupted less than 1 hour ago
-    if (Date.now() - data.startedAt > 60 * 60 * 1000) {
-      await clearRunningPrompt();
-      return null;
-    }
-    return data.prompt;
-  } catch {
-    return null;
-  }
-}
-
-/** Whether the current kill was user-initiated (don't auto-resume) */
-let userInitiatedKill = false;
-
-/** Last result text from Claude Code — used to detect incomplete tasks. */
+/** Last result text — used to detect incomplete tasks */
 let lastResultText = "";
 
-/** Whether the last event before result was a tool call (indicates premature stop). */
-let lastEventWasToolCall = false;
-
-/** Count of non-result events in the current run (to detect empty vs content sessions). */
+/** Count of non-result events in the current turn */
 let eventCount = 0;
 
-/** Whether the last result was an error (don't auto-continue on errors). */
+/** Whether the last result was an error */
 let lastResultIsError = false;
 
-/** Max auto-continue iterations to prevent infinite loops. */
-const MAX_AUTO_CONTINUES = 10;
-
-/** Current auto-continue count for the active task. */
+/** Current auto-continue count */
 let autoContinueCount = 0;
 
-/** Tracks whether BOOT.md has been injected in this daemon session. */
+/** Tracks whether BOOT.md has been injected in this session */
 let bootInjected = false;
 
-/** Path to BOOT.md checklist file. */
-const BOOT_FILE = "/home/agent/.agent/BOOT.md";
+// === System prompt ===
 
-/** Memory flush prompt — sent after task completion to save important facts. */
-const MEMORY_FLUSH_PROMPT = "Sauvegarde les faits importants de cette conversation dans ta memoire claude-mem (smart_search, observations). Resume en 2-3 phrases ce qui s'est passe, les decisions prises, et les informations a retenir pour les prochaines sessions. Sois bref.";
-
-// === Watchdog ===
-
-/**
- * Starts a watchdog that checks every 5s if isRunning is true but
- * activeProc is dead. This catches edge cases where the process dies
- * without the finally block cleaning up (OOM kill, zombie, crash).
- */
-function startWatchdog(): void {
-  stopWatchdog();
-  watchdogTimer = setInterval(() => {
-    if (!isRunning) return;
-
-    // Check if the process object exists but has already exited
-    if (activeProc && activeProc.exitCode !== null) {
-      console.warn(`[runner] Watchdog: process exited (code ${activeProc.exitCode}) but isRunning=true — forcing cleanup`);
-      isRunning = false;
-      activeProc = null;
-
-      if (!resultReceived) {
-        sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
-      }
-      sendMessage({ type: "status", status: "idle" });
-      stopWatchdog();
-    }
-
-    // Check if there's no process at all but isRunning is stuck
-    if (!activeProc && isRunning) {
-      console.warn("[runner] Watchdog: no process but isRunning=true — forcing cleanup");
-      isRunning = false;
-
-      if (!resultReceived) {
-        sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
-      }
-      sendMessage({ type: "status", status: "idle" });
-      stopWatchdog();
-    }
-  }, WATCHDOG_INTERVAL_MS);
-}
-
-function stopWatchdog(): void {
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
-  }
-}
-
-// === API publique ===
-
-/**
- * Retourne true si Claude Code est en cours d'execution.
- */
-export function isBusy(): boolean {
-  return isRunning;
-}
-
-/**
- * Check for an interrupted prompt and auto-resume it.
- * Called once at daemon startup after WS connection is established.
- */
-export async function autoResume(): Promise<void> {
-  const interrupted = await loadInterruptedPrompt();
-  if (!interrupted) return;
-
-  console.log(`[runner] Auto-resuming interrupted task: "${interrupted.slice(0, 80)}..."`);
-  await clearRunningPrompt(); // Clear before resume to avoid infinite retry loops
-
-  // Small delay to let the daemon fully connect
-  await new Promise((r) => setTimeout(r, 2000));
-
-  // Resume with --continue (loads session context) + a resume prompt
-  runPrompt(
-    `Tu as été interrompu pendant la tâche suivante. Continue exactement où tu en étais :\n\n${interrupted}`
-  ).catch((err) => {
-    console.error("[runner] Auto-resume failed:", err);
-  });
-}
-
-/**
- * Interrompt le processus Claude Code en cours.
- *
- * Strategy: SIGINT → SIGTERM → SIGKILL (escalation)
- * - SIGINT: Claude Code interprets this as "stop current task" (like Esc/Ctrl+C)
- *   and returns a result event gracefully, preserving the session.
- * - SIGTERM: If SIGINT didn't work after 5s, force terminate.
- * - SIGKILL: Last resort after another 5s.
- */
-export function killActive(userKill = true): boolean {
-  if (!activeProc) return false;
-
-  console.log(`[runner] Killing active Claude Code process (userKill=${userKill})...`);
-  userInitiatedKill = userKill;
-
-  // If user-initiated kill, clear the running prompt so it won't auto-resume
-  if (userKill) {
-    clearRunningPrompt().catch(() => {});
-  }
-
-  const proc = activeProc;
-
-  // Cancel reader immediately to unblock readNdjsonStream
-  try { activeReader?.cancel(); } catch {}
-
-  // SIGKILL immediately — Claude Code in -p mode doesn't handle SIGINT/SIGTERM gracefully.
-  // Session is preserved via --continue flag on next run (no session ID needed).
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    // Process already dead
-  }
-
-  // Fallback SIGKILL in case the first one didn't work
-  setTimeout(() => {
-    try {
-      if (proc.exitCode === null) proc.kill("SIGKILL");
-    } catch {}
-  }, SIGKILL_GRACE_MS);
-
-  // Note: isRunning is reset in the finally block of runPrompt()
-  // when proc.exited resolves after SIGTERM/SIGKILL
-  return true;
-}
-
-/**
- * Lance Claude Code avec un prompt et capture le flux NDJSON.
- *
- * Workflow :
- *   1. Envoie status "working" au backend
- *   2. Spawn Claude Code avec Bun.spawn
- *   3. Lit stdout en streaming via getReader()
- *   4. Parse chaque ligne JSON (NDJSON)
- *   5. Detecte le lien d'auth s'il existe dans le texte
- *   6. Forward chaque event au backend via stream_event
- *   7. Envoie status "idle" a la fin
- */
-export async function runPrompt(prompt: string): Promise<void> {
-  if (isRunning) {
-    console.warn("[runner] Already running — ignoring new prompt");
-    sendMessage({
-      type: "error",
-      code: "RUNNER_BUSY",
-      message: "Claude Code is already processing a message",
-    });
-    return;
-  }
-
-  isRunning = true;
-  resultReceived = false;
-  userInitiatedKill = false;
-  lastResultText = "";
-  lastEventWasToolCall = false;
-  lastResultIsError = false;
-  eventCount = 0;
-  autoContinueCount = 0;
-
-  // Save the prompt so it can be auto-resumed after daemon restart
-  await saveRunningPrompt(prompt);
-
-  // Notifier le backend : on travaille
-  sendMessage({ type: "status", status: "working" });
-
-  // Start watchdog to catch process crashes
-  startWatchdog();
-
-  let currentPrompt = prompt;
-
-  // Auto-continue loop: if Claude stops mid-task, re-invoke with "continue"
-  while (true) {
-    try {
-      await spawnClaude(currentPrompt);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error("[runner] Error running Claude Code:", message);
-      sendMessage({ type: "error", code: "RUNNER_ERROR", message });
-      break;
-    }
-
-    // If killed by user or no result received, stop
-    if (userInitiatedKill || !resultReceived) break;
-
-    // Check if Claude stopped mid-task (needs auto-continue)
-    if (autoContinueCount >= MAX_AUTO_CONTINUES) {
-      console.warn("[runner] Max auto-continues reached, stopping");
-      break;
-    }
-
-    // Detect if the task seems incomplete — Claude often says things like
-    // "je vais continuer", "voici les X premiers", "je m'arrête ici", etc.
-    // Don't auto-continue on error results
-    const needsContinue = !lastResultIsError && detectIncompleteTask(lastResultText);
-    if (!needsContinue) {
-      console.log(`[runner] Task appears complete — isError=${lastResultIsError}, events=${eventCount}, resultText=${lastResultText.slice(0, 100) || "(empty)"}`);
-      break;
-    }
-
-    // Auto-continue: re-invoke with --continue
-    autoContinueCount++;
-    console.log(`[runner] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES} — task appears incomplete`);
-    resultReceived = false;
-    lastResultText = "";
-    lastEventWasToolCall = false;
-    lastResultIsError = false;
-    eventCount = 0;
-    currentPrompt = "Continue exactement ou tu en etais. Ne repete pas ce que tu as deja fait. Continue la tache.";
-  }
-
-  // Cleanup
-  isRunning = false;
-  activeProc = null;
-  stopWatchdog();
-
-  // Si Claude a ete interrompu avant d'envoyer un event "result" (kill),
-  // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
-  if (!resultReceived) {
-    sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
-  }
-
-  // Clear running prompt if task completed normally (result received)
-  // or if user explicitly killed it. Keep it for auto-resume on crash/restart.
-  if (resultReceived || userInitiatedKill) {
-    await clearRunningPrompt();
-  }
-
-  // Memory flush — after normal completion, ask Claude to save important facts
-  // to claude-mem. Silent fire-and-forget, doesn't block the user.
-  if (resultReceived && !userInitiatedKill) {
-    memoryFlush().catch((err) => {
-      console.warn("[runner] Memory flush failed:", err);
-    });
-  }
-
-  // Notifier le backend : on est idle
-  sendMessage({ type: "status", status: "idle" });
-}
-
-/**
- * Detect if Claude stopped mid-task and needs auto-continue.
- * Returns true if the result text suggests the task is incomplete.
- */
-function detectIncompleteTask(resultText: string): boolean {
-  // If result text is empty but there were many events, Claude stopped mid-task
-  // without writing a conclusion. This happens when hitting the tool-call limit.
-  if (!resultText.trim() && eventCount >= 5) {
-    console.log(`[runner] Detected premature stop: empty result after ${eventCount} events`);
-    return true;
-  }
-
-  if (!resultText) return false;
-  const lower = resultText.toLowerCase();
-
-  // Patterns that suggest Claude stopped mid-task
-  const incompletePatterns = [
-    // French — intent to continue / stopped mid-task
-    "je vais continuer", "je poursuis",
-    "voici les .* premiers",
-    "je m'arrete ici", "je m'arrête ici",
-    "voulez-vous que je continue", "veux-tu que je continue",
-    "dois-je continuer",
-    "suite au prochain",
-    "il en reste", "il reste encore",
-    "je n'ai pas encore fini", "pas encore termine",
-    "j'ai fait .* sur", "j'ai traite .* sur",
-    // English — intent to continue / stopped mid-task
-    "i'll continue", "shall i continue", "should i continue",
-    "want me to continue", "let me continue",
-    "here are the first", "i've done .* out of",
-    "i stopped", "i'll proceed",
-  ];
-
-  return incompletePatterns.some((pattern) => {
-    try {
-      return new RegExp(pattern, "i").test(lower);
-    } catch {
-      return lower.includes(pattern);
-    }
-  });
-}
-
-/**
- * Memory flush — silently ask Claude to save important facts from the
- * conversation into claude-mem. Fire-and-forget, doesn't stream to UI.
- */
-async function memoryFlush(): Promise<void> {
-  console.log("[runner] Memory flush — saving conversation facts to claude-mem...");
-
-  try {
-    const proc = Bun.spawn([
-      "claude",
-      "-p",
-      MEMORY_FLUSH_PROMPT,
-      "--continue",
-      "--dangerously-skip-permissions",
-      "--output-format", "json",
-      "--max-turns", "3",
-    ], {
-      cwd: "/home/agent",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    // Kill orphan MCP processes first
-    try { Bun.spawnSync(["pkill", "-f", "chrome-devtools-mcp"], { stdout: "ignore", stderr: "ignore" }); } catch {}
-
-    const exitCode = await proc.exited;
-    console.log(`[runner] Memory flush completed (exit ${exitCode})`);
-  } catch (err) {
-    console.warn("[runner] Memory flush error:", err);
-  }
-}
-
-// === Internals ===
-
-/**
- * Spawn Claude Code et traite le flux NDJSON.
- */
-/** System prompt appended to every Claude Code invocation. */
 const AGENT_SYSTEM_PROMPT = [
   "## Regles d'execution",
   "",
@@ -463,24 +124,214 @@ async function buildPersonaPrompt(): Promise<string | null> {
   return "# Persona Agent\n\n" + sections.join("\n\n---\n\n");
 }
 
-async function spawnClaude(prompt: string): Promise<void> {
-  // Build system prompt: base rules + optional persona
-  let systemPrompt = AGENT_SYSTEM_PROMPT;
+/**
+ * Write the system prompt (agent rules + persona) to CLAUDE.md.
+ * The SDK loads this automatically as project instructions.
+ * Called at daemon startup and when persona changes.
+ */
+export async function writeSystemPromptFile(): Promise<void> {
+  let content = "";
+
   const personaPrompt = await buildPersonaPrompt();
   if (personaPrompt) {
-    systemPrompt = personaPrompt + "\n\n---\n\n" + systemPrompt;
-    console.log("[runner] Persona enabled — injecting persona files into system prompt");
+    content = personaPrompt + "\n\n---\n\n";
+    console.log("[runner] Persona enabled — writing to CLAUDE.md");
   }
 
-  // BOOT.md — inject once per daemon session as prefix to the first prompt
-  let finalPrompt = prompt;
+  content += AGENT_SYSTEM_PROMPT;
+
+  await Bun.write(CLAUDE_MD_FILE, content);
+  console.log("[runner] CLAUDE.md written with system prompt");
+}
+
+// === Running prompt persistence (auto-resume after crash) ===
+
+async function saveRunningPrompt(prompt: string): Promise<void> {
+  try {
+    await Bun.write(RUNNING_PROMPT_FILE, JSON.stringify({ prompt, startedAt: Date.now() }));
+  } catch {}
+}
+
+async function clearRunningPrompt(): Promise<void> {
+  try {
+    const { unlink } = await import("node:fs/promises");
+    await unlink(RUNNING_PROMPT_FILE);
+  } catch {}
+}
+
+async function loadInterruptedPrompt(): Promise<string | null> {
+  try {
+    const file = Bun.file(RUNNING_PROMPT_FILE);
+    if (!(await file.exists())) return null;
+    const data = JSON.parse(await file.text());
+    // Only resume if interrupted less than 1 hour ago
+    if (Date.now() - data.startedAt > 60 * 60 * 1000) {
+      await clearRunningPrompt();
+      return null;
+    }
+    return data.prompt;
+  } catch {
+    return null;
+  }
+}
+
+// === Session management ===
+
+/**
+ * Initialize the runner at daemon startup.
+ * Sets cwd to /home/agent (SDK uses process.cwd() as project directory)
+ * and writes the CLAUDE.md system prompt file.
+ */
+export async function initRunner(): Promise<void> {
+  process.chdir("/home/agent");
+  console.log("[runner] cwd set to /home/agent");
+
+  await writeSystemPromptFile();
+}
+
+/**
+ * Create or resume the SDK V2 session. Lazy — called on first message.
+ */
+async function ensureSession(): Promise<SDKSession> {
+  if (session) return session;
+
+  const existingSessionId = await loadSession();
+
+  const options: Record<string, unknown> = {
+    model: "claude-opus-4-6",
+    permissionMode: "bypassPermissions",
+  };
+
+  if (existingSessionId) {
+    console.log(`[runner] Resuming session ${existingSessionId.slice(0, 8)}...`);
+    try {
+      session = unstable_v2_resumeSession(existingSessionId, options as any);
+      return session;
+    } catch (err) {
+      console.warn("[runner] Failed to resume session, creating new one:", err);
+      await clearSession();
+    }
+  }
+
+  console.log("[runner] Creating new SDK V2 session...");
+  session = unstable_v2_createSession(options as any);
+  return session;
+}
+
+// === API publique ===
+
+/**
+ * Retourne true si Claude Code est en cours d'execution.
+ */
+export function isBusy(): boolean {
+  return isRunning;
+}
+
+/**
+ * Check for an interrupted prompt and auto-resume it.
+ * Called once at daemon startup after WS connection is established.
+ */
+export async function autoResume(): Promise<void> {
+  const interrupted = await loadInterruptedPrompt();
+  if (!interrupted) return;
+
+  console.log(`[runner] Auto-resuming interrupted task: "${interrupted.slice(0, 80)}..."`);
+  await clearRunningPrompt();
+
+  // Small delay to let the daemon fully connect
+  await new Promise((r) => setTimeout(r, 2000));
+
+  runPrompt(
+    `Tu as été interrompu pendant la tâche suivante. Continue exactement où tu en étais :\n\n${interrupted}`
+  ).catch((err) => {
+    console.error("[runner] Auto-resume failed:", err);
+  });
+}
+
+/**
+ * Gracefully interrupt the current stream.
+ * The session stays intact — next send() continues in the same context.
+ * No SIGKILL, no process death — just breaks the for-await loop.
+ */
+export function interruptCurrent(userKill = true): boolean {
+  if (!isStreaming) return false;
+
+  console.log(`[runner] Interrupting stream (userKill=${userKill})...`);
+  userInitiatedInterrupt = userKill;
+  streamAborted = true;
+
+  if (userKill) {
+    clearRunningPrompt().catch(() => {});
+  }
+
+  return true;
+}
+
+/**
+ * Close the current session and force a new one on next message.
+ * Used by /reload to get a fresh session with reloaded MCPs.
+ */
+export function resetSession(): void {
+  console.log("[runner] Resetting session — next message creates a new one");
+  if (isStreaming) {
+    streamAborted = true;
+  }
+  try { session?.close(); } catch {}
+  session = null;
+  bootInjected = false;
+  clearSession().catch(() => {});
+}
+
+/**
+ * Gracefully close the session for daemon shutdown.
+ */
+export function closeSession(): void {
+  if (isStreaming) {
+    streamAborted = true;
+  }
+  try { session?.close(); } catch {}
+  session = null;
+}
+
+// === Main prompt execution ===
+
+/**
+ * Send a prompt to Claude via SDK V2 session and stream the response.
+ * Includes auto-continue for incomplete tasks and memory flush after completion.
+ */
+export async function runPrompt(prompt: string): Promise<void> {
+  if (isRunning) {
+    console.warn("[runner] Already running — ignoring new prompt");
+    sendMessage({
+      type: "error",
+      code: "RUNNER_BUSY",
+      message: "Claude Code is already processing a message",
+    });
+    return;
+  }
+
+  isRunning = true;
+  resultReceived = false;
+  userInitiatedInterrupt = false;
+  streamAborted = false;
+  lastResultText = "";
+  lastResultIsError = false;
+  eventCount = 0;
+  autoContinueCount = 0;
+
+  await saveRunningPrompt(prompt);
+  sendMessage({ type: "status", status: "working" });
+
+  let currentPrompt = prompt;
+
+  // BOOT.md — inject once per session as prefix to the first prompt
   if (!bootInjected) {
     try {
       const bootFile = Bun.file(BOOT_FILE);
       if (await bootFile.exists()) {
         const bootContent = (await bootFile.text()).trim();
         if (bootContent) {
-          finalPrompt = `[Instructions de demarrage]\n${bootContent}\n\n[Message utilisateur]\n${prompt}`;
+          currentPrompt = `[Instructions de demarrage]\n${bootContent}\n\n[Message utilisateur]\n${prompt}`;
           console.log("[runner] BOOT.md injected into first prompt");
         }
       }
@@ -488,190 +339,235 @@ async function spawnClaude(prompt: string): Promise<void> {
     bootInjected = true;
   }
 
-  // Construire les arguments CLI
-  const args = [
-    "claude",
-    "-p",
-    finalPrompt,
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--dangerously-skip-permissions",
-    "--include-partial-messages",
-    "--append-system-prompt",
-    systemPrompt,
-  ];
-
-  // Always use --continue to pick up the most recent session.
-  // This works even after SIGKILL because Claude Code persists sessions to disk.
-  // Only skip --continue on the very first message (no project dir yet).
-  const projectDir = "/home/agent/.claude/projects/-home-agent";
-  let hasExistingSession = false;
-  try {
-    const entries = await import("node:fs/promises").then((fs) => fs.readdir(projectDir));
-    hasExistingSession = entries.some((e) => e.endsWith(".jsonl"));
-  } catch {
-    // Dir doesn't exist = no previous session
-  }
-
-  if (hasExistingSession) {
-    args.push("--continue");
-    console.log("[runner] Continuing most recent session...");
-  } else {
-    console.log("[runner] Starting new Claude Code session (first message)");
-  }
-
-  // Kill orphan MCP processes from previous Claude Code sessions.
-  // Claude Code spawns MCP subprocesses (chrome-devtools-mcp, etc.) that
-  // survive SIGKILL and accumulate, leaking ~500MB each.
-  try {
-    Bun.spawnSync(["pkill", "-f", "chrome-devtools-mcp"], { stdout: "ignore", stderr: "ignore" });
-  } catch {}
-
-
-  console.log(`[runner] Spawning: claude -p "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
-
-  // Spawn le processus dans le home de l'agent (pas dans /opt/agentway-agent)
-  const proc = Bun.spawn(args, {
-    cwd: "/home/agent",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  activeProc = proc;
-
-  // Max runtime timeout
-  const runtimeTimeout = setTimeout(() => {
-    console.warn("[runner] Claude Code exceeded max runtime, killing...");
-    killActive();
-  }, MAX_RUNTIME_MS);
-
-  // Lire stderr en parallele (pour les logs)
-  const stderrPromise = new Response(proc.stderr as ReadableStream).text();
-
-  // Lire stdout en streaming NDJSON
-  const stdout = proc.stdout as ReadableStream<Uint8Array>;
-  await readNdjsonStream(stdout);
-
-  // Attendre la fin du processus
-  await proc.exited;
-  clearTimeout(runtimeTimeout);
-
-  const exitCode = proc.exitCode ?? 1;
-  const stderr = await stderrPromise;
-
-  if (stderr.trim()) {
-    console.warn(`[runner] stderr: ${stderr.trim().slice(0, 200)}`);
-  }
-
-  if (exitCode !== 0) {
-    console.warn(`[runner] Claude Code exited with code ${exitCode}`);
-  }
-}
-
-/**
- * Lit le flux stdout NDJSON d'un processus Claude Code.
- * Parse chaque ligne, detecte les liens d'auth, forward les events.
- */
-async function readNdjsonStream(stdout: ReadableStream<Uint8Array>): Promise<void> {
-  const reader = stdout.getReader();
-  activeReader = reader;
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
+  // Auto-continue loop: if Claude stops mid-task, send "continue" in the same session
   while (true) {
-    let result: ReadableStreamReadResult<Uint8Array>;
     try {
-      result = await reader.read();
-    } catch {
-      // Reader cancelled (kill signal) — sortie propre
+      await streamTurn(currentPrompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[runner] Error during stream:", message);
+      sendMessage({ type: "error", code: "RUNNER_ERROR", message });
+
+      // If session is broken, reset it so the next message creates a fresh one
+      if (message.includes("closed") || message.includes("spawn") || message.includes("ENOENT")) {
+        console.warn("[runner] Session appears broken, resetting...");
+        try { session?.close(); } catch {}
+        session = null;
+      }
       break;
     }
-    const { done, value } = result;
-    if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+    // If killed by user or no result received, stop
+    if (userInitiatedInterrupt || !resultReceived) break;
 
-    // Traiter chaque ligne complete
-    let newlineIdx: number;
-    while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, newlineIdx).trim();
-      buffer = buffer.slice(newlineIdx + 1);
-
-      if (!line) continue;
-
-      processNdjsonLine(line);
+    // Check auto-continue limit
+    if (autoContinueCount >= MAX_AUTO_CONTINUES) {
+      console.warn("[runner] Max auto-continues reached, stopping");
+      break;
     }
+
+    // Detect if the task seems incomplete
+    const needsContinue = !lastResultIsError && detectIncompleteTask(lastResultText);
+    if (!needsContinue) {
+      console.log(`[runner] Task complete — isError=${lastResultIsError}, events=${eventCount}, result=${lastResultText.slice(0, 100) || "(empty)"}`);
+      break;
+    }
+
+    // Auto-continue: send a new message in the same session (no respawn!)
+    autoContinueCount++;
+    console.log(`[runner] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES}`);
+    resultReceived = false;
+    lastResultText = "";
+    lastResultIsError = false;
+    eventCount = 0;
+    streamAborted = false;
+    currentPrompt = "Continue exactement ou tu en etais. Ne repete pas ce que tu as deja fait. Continue la tache.";
   }
 
-  // Traiter le reste du buffer s'il y en a
-  const remaining = buffer.trim();
-  if (remaining) {
-    processNdjsonLine(remaining);
+  // Synthetic result if interrupted before result event
+  if (!resultReceived) {
+    sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
   }
+
+  // Clear running prompt on normal completion or user kill
+  if (resultReceived || userInitiatedInterrupt) {
+    await clearRunningPrompt();
+  }
+
+  // Memory flush after normal completion — await with timeout before going idle
+  if (resultReceived && !userInitiatedInterrupt) {
+    await Promise.race([
+      memoryFlush(),
+      new Promise((r) => setTimeout(r, MEMORY_FLUSH_TIMEOUT_MS)),
+    ]);
+  }
+
+  isRunning = false;
+  sendMessage({ type: "status", status: "idle" });
+}
+
+// === Stream execution ===
+
+/**
+ * Execute a single send/stream turn on the persistent session.
+ */
+async function streamTurn(prompt: string): Promise<void> {
+  const s = await ensureSession();
+
+  console.log(`[runner] Sending: "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
+
+  await s.send(prompt);
+  isStreaming = true;
+
+  // Max runtime timeout for this turn
+  const runtimeTimeout = setTimeout(() => {
+    console.warn("[runner] Turn exceeded max runtime, interrupting...");
+    interruptCurrent(false);
+  }, MAX_TURN_MS);
+
+  try {
+    for await (const msg of s.stream()) {
+      if (streamAborted) {
+        console.log("[runner] Stream aborted (graceful interrupt)");
+        break;
+      }
+
+      processSDKMessage(msg);
+    }
   } finally {
-    activeReader = null;
-    try { reader.releaseLock(); } catch {}
+    isStreaming = false;
+    clearTimeout(runtimeTimeout);
   }
 }
 
+// === Event processing ===
+
 /**
- * Traite une seule ligne NDJSON de Claude Code.
+ * Process a single SDK message — forward to backend and track state.
+ * SDK events have the same types as CLI NDJSON: assistant, user, result, system, stream_event.
+ * They are wrapped in { type: "stream_event", event: msg } for the backend WS,
+ * exactly like the old CLI runner did with NDJSON lines.
  */
-function processNdjsonLine(line: string): void {
-  let event: Record<string, unknown>;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    // Pas du JSON — peut etre un message texte brut (ex: lien d'auth avant JSON)
-    checkForAuthUrl(line);
+function processSDKMessage(msg: SDKMessage): void {
+  const event = msg as Record<string, unknown>;
+
+  // During memory flush, don't forward events to the UI
+  if (isMemoryFlushing) {
+    if (event.type === "result") {
+      resultReceived = true;
+    }
     return;
   }
 
-  // Forward l'event brut au backend
-  sendMessage({ type: "stream_event", event });
-
-  // Track event types for auto-continue detection
-  const evType = event.type as string | undefined;
-  if (evType && evType !== "result") {
-    eventCount++;
-    // Claude Code NDJSON wraps tool calls inside "assistant" events with content blocks,
-    // and "user" events with tool_result blocks. Also detect direct tool_use/tool_result types.
-    lastEventWasToolCall = evType === "tool_use" || evType === "tool_result" ||
-      (evType === "assistant" && Array.isArray((event as any).message?.content) &&
-        (event as any).message.content.some((b: any) => b.type === "tool_use" || b.type === "tool_result"));
+  // Ensure SDKResultError has a `result` field for frontend compatibility.
+  // SDKResultSuccess has result:string, but SDKResultError only has errors:string[].
+  if (event.type === "result" && !("result" in event)) {
+    const errors = Array.isArray(event.errors) ? event.errors : [];
+    (event as any).result = errors.join("; ");
   }
 
-  // Marquer que le result a ete recu (run normal, pas interrompu)
+  // Forward event to backend (same wrapping as the old CLI runner)
+  sendMessage({ type: "stream_event", event });
+
+  // Track event count for auto-continue detection
+  const evType = event.type as string | undefined;
+  if (evType && evType !== "result" && evType !== "system") {
+    eventCount++;
+  }
+
+  // Track result events
   if (event.type === "result") {
     resultReceived = true;
     lastResultText = typeof event.result === "string" ? event.result : "";
-    lastResultIsError = Boolean((event as Record<string, unknown>).is_error);
+    lastResultIsError = Boolean(event.is_error);
+
+    // Save session ID for future resumption
+    if (typeof event.session_id === "string") {
+      saveSession(event.session_id).catch((err) => {
+        console.error("[runner] Failed to save session:", err);
+      });
+    }
   }
 
-  // Extraire le session ID de l'event "result"
-  if (event.type === "result" && typeof event.session_id === "string") {
-    saveSession(event.session_id).catch((err) => {
-      console.error("[runner] Failed to save session:", err);
-    });
-  }
-
-  // Chercher un lien d'auth dans le contenu textuel des events
+  // Auth URL detection in text content
   extractAndSendAuthUrl(event);
 }
 
+// === Memory flush ===
+
 /**
- * Extrait un lien d'auth depuis un event NDJSON.
- *
- * Le lien d'auth peut apparaitre dans :
- *   - Un event de type "system" avec un message texte
- *   - Un event de type "assistant" avec du contenu text
- *   - Un event de type "result" avec le result text
- *   - La sortie stderr/text brute
+ * Memory flush — ask Claude to save important facts from the conversation.
+ * Uses the same session (no separate process). Silent: events NOT forwarded to UI.
  */
+async function memoryFlush(): Promise<void> {
+  if (!session) return;
+
+  console.log("[runner] Memory flush — saving conversation facts...");
+  isMemoryFlushing = true;
+  streamAborted = false;
+
+  try {
+    await session.send(MEMORY_FLUSH_PROMPT);
+    isStreaming = true;
+
+    for await (const msg of session.stream()) {
+      if (streamAborted) break;
+      // Just drain the stream, don't forward to UI
+      // But still track result to know when done
+      if ((msg as any).type === "result") break;
+    }
+
+    console.log("[runner] Memory flush completed");
+  } catch (err) {
+    console.warn("[runner] Memory flush error:", err);
+  } finally {
+    isStreaming = false;
+    isMemoryFlushing = false;
+  }
+}
+
+// === Incomplete task detection ===
+
+function detectIncompleteTask(resultText: string): boolean {
+  // Empty result after many events = Claude stopped mid-task (tool-call limit)
+  if (!resultText.trim() && eventCount >= 5) {
+    console.log(`[runner] Detected premature stop: empty result after ${eventCount} events`);
+    return true;
+  }
+
+  if (!resultText) return false;
+  const lower = resultText.toLowerCase();
+
+  const incompletePatterns = [
+    // French — intent to continue / stopped mid-task
+    "je vais continuer", "je poursuis",
+    "voici les .* premiers",
+    "je m'arrete ici", "je m'arrête ici",
+    "voulez-vous que je continue", "veux-tu que je continue",
+    "dois-je continuer",
+    "suite au prochain",
+    "il en reste", "il reste encore",
+    "je n'ai pas encore fini", "pas encore termine",
+    "j'ai fait .* sur", "j'ai traite .* sur",
+    // English — intent to continue / stopped mid-task
+    "i'll continue", "shall i continue", "should i continue",
+    "want me to continue", "let me continue",
+    "here are the first", "i've done .* out of",
+    "i stopped", "i'll proceed",
+  ];
+
+  return incompletePatterns.some((pattern) => {
+    try {
+      return new RegExp(pattern, "i").test(lower);
+    } catch {
+      return lower.includes(pattern);
+    }
+  });
+}
+
+// === Auth URL detection ===
+
 function extractAndSendAuthUrl(event: Record<string, unknown>): void {
-  // Chercher dans le texte de l'event
   const textsToCheck: string[] = [];
 
   // Event system (init, messages)
@@ -696,20 +592,23 @@ function extractAndSendAuthUrl(event: Record<string, unknown>): void {
     textsToCheck.push(event.result);
   }
 
-  // Event system subtype
+  // Event system subtype data
   if (typeof event.subtype === "string" && typeof event.data === "string") {
     textsToCheck.push(event.data);
   }
 
-  // Verifier chaque texte pour un lien d'auth
+  // SDK auth_status events
+  if (event.type === "auth_status" && Array.isArray(event.output)) {
+    for (const line of event.output) {
+      if (typeof line === "string") textsToCheck.push(line);
+    }
+  }
+
   for (const text of textsToCheck) {
     checkForAuthUrl(text);
   }
 }
 
-/**
- * Verifie si un texte contient un lien d'auth Claude et l'envoie au backend.
- */
 function checkForAuthUrl(text: string): void {
   const match = text.match(AUTH_URL_PATTERN);
   if (match) {

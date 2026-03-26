@@ -2,8 +2,7 @@
 // Handlers pour les messages inbound recus du backend.
 
 import type { DaemonInboundMessage } from "./types.ts";
-import { runPrompt, killActive } from "../claude/runner.ts";
-import { clearSession } from "../claude/session.ts";
+import { runPrompt, interruptCurrent, resetSession } from "../claude/runner.ts";
 import { sendMessage } from "./client.ts";
 
 /**
@@ -56,16 +55,16 @@ function handleInjectMessage(content: string, attachments?: string[]): void {
         is_error: true,
       },
     });
-    sendMessage({ type: "status", status: "active" });
+    sendMessage({ type: "status", status: "idle" });
     return;
   }
 
-  // /reload — restart the entire daemon via systemctl.
+  // /reload — reset the SDK session and restart the daemon.
   // This triggers the full flow: daemon connect → ensures (re-merge MCPs) → active.
   // Claude Code starts fresh with all MCPs loaded.
   if (cmd === "/reload") {
-    console.log("[handlers] /reload command received — restarting daemon via systemctl");
-    killActive();
+    console.log("[handlers] /reload command received — resetting session + restarting daemon");
+    resetSession();
     sendMessage({
       type: "stream_event",
       event: {
@@ -158,13 +157,14 @@ async function handleExec(requestId: string, command: string): Promise<void> {
 }
 
 /**
- * Envoie SIGTERM au processus Claude Code en cours.
+ * Gracefully interrupt the current Claude stream.
+ * No SIGKILL — just breaks the for-await loop, session stays intact.
  */
 function handleKill(): void {
-  console.log("[handlers] kill received — sending SIGTERM to Claude Code process");
-  const killed = killActive();
-  if (!killed) {
-    console.log("[handlers] No active Claude Code process to kill");
+  console.log("[handlers] kill received — interrupting current stream");
+  const interrupted = interruptCurrent();
+  if (!interrupted) {
+    console.log("[handlers] No active stream to interrupt");
   }
 }
 

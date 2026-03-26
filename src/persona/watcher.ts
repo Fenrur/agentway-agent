@@ -4,6 +4,7 @@
 
 import { watch, existsSync } from "node:fs";
 import { sendMessage } from "../ws/client.ts";
+import { writeSystemPromptFile } from "../claude/runner.ts";
 
 const AGENT_DIR = "/home/agent/.agent";
 const IDENTITY_PATH = `${AGENT_DIR}/IDENTITY.md`;
@@ -23,6 +24,12 @@ function extractField(content: string, field: string): string | null {
 
 /** Debounce timer for IDENTITY.md changes. */
 let identityDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** Debounce timer for CLAUDE.md regeneration on persona file changes. */
+let claudeMdDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** Persona files that affect the system prompt in CLAUDE.md. */
+const PERSONA_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"];
 
 /** Read IDENTITY.md and send persona_update to backend. */
 async function syncIdentity(): Promise<void> {
@@ -84,6 +91,16 @@ export function startPersonaWatcher(): void {
       if (filename === "BOOTSTRAP.md") {
         // Small delay to let the deletion settle
         setTimeout(checkBootstrapDeletion, 500);
+      }
+
+      // Regenerate CLAUDE.md when any persona file changes
+      if (PERSONA_FILES.includes(filename)) {
+        if (claudeMdDebounce) clearTimeout(claudeMdDebounce);
+        claudeMdDebounce = setTimeout(() => {
+          writeSystemPromptFile().catch((err) => {
+            console.warn("[persona] Failed to regenerate CLAUDE.md:", err);
+          });
+        }, 3_000);
       }
     });
 
