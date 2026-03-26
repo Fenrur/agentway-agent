@@ -77,6 +77,18 @@ async function loadInterruptedPrompt(): Promise<string | null> {
 /** Whether the current kill was user-initiated (don't auto-resume) */
 let userInitiatedKill = false;
 
+/** Last result text from Claude Code — used to detect incomplete tasks. */
+let lastResultText = "";
+
+/** Whether the last event before result was a tool call (indicates premature stop). */
+let lastEventWasToolCall = false;
+
+/** Max auto-continue iterations to prevent infinite loops. */
+const MAX_AUTO_CONTINUES = 10;
+
+/** Current auto-continue count for the active task. */
+let autoContinueCount = 0;
+
 /** Tracks whether BOOT.md has been injected in this daemon session. */
 let bootInjected = false;
 
@@ -234,6 +246,9 @@ export async function runPrompt(prompt: string): Promise<void> {
   isRunning = true;
   resultReceived = false;
   userInitiatedKill = false;
+  lastResultText = "";
+  lastEventWasToolCall = false;
+  autoContinueCount = 0;
 
   // Save the prompt so it can be auto-resumed after daemon restart
   await saveRunningPrompt(prompt);
@@ -244,40 +259,112 @@ export async function runPrompt(prompt: string): Promise<void> {
   // Start watchdog to catch process crashes
   startWatchdog();
 
-  try {
-    await spawnClaude(prompt);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[runner] Error running Claude Code:", message);
-    sendMessage({ type: "error", code: "RUNNER_ERROR", message });
-  } finally {
-    isRunning = false;
-    activeProc = null;
-    stopWatchdog();
+  let currentPrompt = prompt;
 
-    // Si Claude a ete interrompu avant d'envoyer un event "result" (kill),
-    // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
-    if (!resultReceived) {
-      sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+  // Auto-continue loop: if Claude stops mid-task, re-invoke with "continue"
+  while (true) {
+    try {
+      await spawnClaude(currentPrompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[runner] Error running Claude Code:", message);
+      sendMessage({ type: "error", code: "RUNNER_ERROR", message });
+      break;
     }
 
-    // Clear running prompt if task completed normally (result received)
-    // or if user explicitly killed it. Keep it for auto-resume on crash/restart.
-    if (resultReceived || userInitiatedKill) {
-      await clearRunningPrompt();
+    // If killed by user or no result received, stop
+    if (userInitiatedKill || !resultReceived) break;
+
+    // Check if Claude stopped mid-task (needs auto-continue)
+    if (autoContinueCount >= MAX_AUTO_CONTINUES) {
+      console.warn("[runner] Max auto-continues reached, stopping");
+      break;
     }
 
-    // Memory flush — after normal completion, ask Claude to save important facts
-    // to claude-mem. Silent fire-and-forget, doesn't block the user.
-    if (resultReceived && !userInitiatedKill) {
-      memoryFlush().catch((err) => {
-        console.warn("[runner] Memory flush failed:", err);
-      });
-    }
+    // Detect if the task seems incomplete — Claude often says things like
+    // "je vais continuer", "voici les X premiers", "je m'arrête ici", etc.
+    const needsContinue = detectIncompleteTask(lastResultText);
+    if (!needsContinue) break;
 
-    // Notifier le backend : on est idle
-    sendMessage({ type: "status", status: "idle" });
+    // Auto-continue: re-invoke with --continue
+    autoContinueCount++;
+    console.log(`[runner] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES} — task appears incomplete`);
+    resultReceived = false;
+    lastResultText = "";
+    lastEventWasToolCall = false;
+    currentPrompt = "Continue exactement ou tu en etais. Ne repete pas ce que tu as deja fait. Continue la tache.";
   }
+
+  // Cleanup
+  isRunning = false;
+  activeProc = null;
+  stopWatchdog();
+
+  // Si Claude a ete interrompu avant d'envoyer un event "result" (kill),
+  // envoyer un result synthetique pour que l'UI nettoie isStreaming/isWaiting.
+  if (!resultReceived) {
+    sendMessage({ type: "stream_event", event: { type: "result", result: "", is_error: true, subtype: "error" } });
+  }
+
+  // Clear running prompt if task completed normally (result received)
+  // or if user explicitly killed it. Keep it for auto-resume on crash/restart.
+  if (resultReceived || userInitiatedKill) {
+    await clearRunningPrompt();
+  }
+
+  // Memory flush — after normal completion, ask Claude to save important facts
+  // to claude-mem. Silent fire-and-forget, doesn't block the user.
+  if (resultReceived && !userInitiatedKill) {
+    memoryFlush().catch((err) => {
+      console.warn("[runner] Memory flush failed:", err);
+    });
+  }
+
+  // Notifier le backend : on est idle
+  sendMessage({ type: "status", status: "idle" });
+}
+
+/**
+ * Detect if Claude stopped mid-task and needs auto-continue.
+ * Returns true if the result text suggests the task is incomplete.
+ */
+function detectIncompleteTask(resultText: string): boolean {
+  // If the last event before result was a tool call and result text is empty,
+  // Claude stopped mid-task without writing a conclusion → needs continue
+  if (lastEventWasToolCall && !resultText.trim()) {
+    console.log("[runner] Detected premature stop: last event was tool call, no conclusion text");
+    return true;
+  }
+
+  if (!resultText) return false;
+  const lower = resultText.toLowerCase();
+
+  // Patterns that suggest Claude stopped mid-task
+  const incompletePatterns = [
+    // French
+    "je continue", "je vais continuer", "je poursuis",
+    "voici les premiers", "voici les .* premiers",
+    "je m'arrete ici", "je m'arrête ici",
+    "voulez-vous que je continue", "veux-tu que je continue",
+    "dois-je continuer", "on continue",
+    "suite au prochain", "la suite",
+    "il en reste", "il reste encore",
+    "je n'ai pas encore fini", "pas encore termine",
+    "j'ai fait .* sur", "j'ai traite .* sur",
+    // English
+    "i'll continue", "shall i continue", "should i continue",
+    "want me to continue", "let me continue",
+    "here are the first", "i've done .* out of",
+    "remaining", "i stopped", "i'll proceed",
+  ];
+
+  return incompletePatterns.some((pattern) => {
+    try {
+      return new RegExp(pattern, "i").test(lower);
+    } catch {
+      return lower.includes(pattern);
+    }
+  });
 }
 
 /**
@@ -531,9 +618,19 @@ function processNdjsonLine(line: string): void {
   // Forward l'event brut au backend
   sendMessage({ type: "stream_event", event });
 
+  // Track if this event is a tool call (for auto-continue detection)
+  const evType = event.type as string | undefined;
+  if (evType && evType !== "result") {
+    // tool_use, tool_result, assistant with tool calls = tool event
+    lastEventWasToolCall = evType === "tool_use" || evType === "tool_result" ||
+      (evType === "assistant" && Array.isArray((event as any).message?.content) &&
+        (event as any).message.content.some((b: any) => b.type === "tool_use" || b.type === "tool_result"));
+  }
+
   // Marquer que le result a ete recu (run normal, pas interrompu)
   if (event.type === "result") {
     resultReceived = true;
+    lastResultText = typeof event.result === "string" ? event.result : "";
   }
 
   // Extraire le session ID de l'event "result"
