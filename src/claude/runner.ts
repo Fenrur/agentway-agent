@@ -40,7 +40,7 @@ let resultReceived = false;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 /** File to track the currently running prompt for auto-resume after crash/restart */
-const RUNNING_PROMPT_FILE = "/opt/agentway-agent/running_prompt.json";
+const RUNNING_PROMPT_FILE = "/home/agent/.agentway-running-prompt.json";
 
 /** Save the current prompt so it can be resumed after a crash */
 async function saveRunningPrompt(prompt: string): Promise<void> {

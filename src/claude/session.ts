@@ -4,8 +4,8 @@
 
 import { join } from "path";
 
-/** Chemin du fichier de session (relatif au cwd du daemon) */
-const SESSION_FILE = join(process.cwd(), "session.json");
+/** Chemin du fichier de session dans le home agent (writable) */
+const SESSION_FILE = "/home/agent/.agentway-session.json";
 
 interface SessionData {
   sessionId: string;
