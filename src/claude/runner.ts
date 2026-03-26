@@ -28,11 +28,11 @@ const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s
 /** Max auto-continue iterations to prevent infinite loops */
 const MAX_AUTO_CONTINUES = 10;
 
-/** Memory flush prompt */
-const MEMORY_FLUSH_PROMPT = "Sauvegarde les faits importants de cette conversation dans ta memoire claude-mem (smart_search, observations). Resume en 2-3 phrases ce qui s'est passe, les decisions prises, et les informations a retenir pour les prochaines sessions. Sois bref.";
-
-/** Memory flush timeout (15s) */
-const MEMORY_FLUSH_TIMEOUT_MS = 15_000;
+// Memory flush removed — with persistent SDK V2 sessions, Claude keeps
+// full context across messages. The old flush (saving to claude-mem) was
+// needed when each message spawned a new process. Now it would pollute
+// the conversation history since session.send() injects it as a real
+// user message visible to Claude.
 
 // === File paths ===
 
@@ -54,8 +54,6 @@ let isStreaming = false;
 /** Flag to gracefully abort the current stream */
 let streamAborted = false;
 
-/** True when running a silent memory flush (don't forward events to UI) */
-let isMemoryFlushing = false;
 
 /** True if a "result" event was received during the current turn */
 let resultReceived = false;
@@ -310,16 +308,7 @@ export async function runPrompt(prompt: string): Promise<void> {
     return;
   }
 
-  // If a memory flush is running in background, abort it so we can use the session
-  if (isMemoryFlushing) {
-    console.log("[runner] Aborting background memory flush for new message");
-    streamAborted = true;
-    // Wait for flush to release the session (max 2s)
-    const start = Date.now();
-    while (isMemoryFlushing && Date.now() - start < 2000) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+
 
   isRunning = true;
   resultReceived = false;
@@ -405,17 +394,8 @@ export async function runPrompt(prompt: string): Promise<void> {
     await clearRunningPrompt();
   }
 
-  // Go idle BEFORE memory flush — don't block user messages during flush.
-  // The flush uses a separate guard (isMemoryFlushing) to serialize with the next runPrompt.
   isRunning = false;
   sendMessage({ type: "status", status: "idle" });
-
-  // Memory flush after normal completion — fire-and-forget, runs in background
-  if (resultReceived && !userInitiatedInterrupt) {
-    memoryFlush().catch((err) => {
-      console.warn("[runner] Memory flush failed:", err);
-    });
-  }
 }
 
 // === Stream execution ===
@@ -463,14 +443,6 @@ async function streamTurn(prompt: string): Promise<void> {
 function processSDKMessage(msg: SDKMessage): void {
   const event = msg as Record<string, unknown>;
 
-  // During memory flush, don't forward events to the UI
-  if (isMemoryFlushing) {
-    if (event.type === "result") {
-      resultReceived = true;
-    }
-    return;
-  }
-
   // Ensure SDKResultError has a `result` field for frontend compatibility.
   // SDKResultSuccess has result:string, but SDKResultError only has errors:string[].
   if (event.type === "result" && !("result" in event)) {
@@ -503,39 +475,6 @@ function processSDKMessage(msg: SDKMessage): void {
 
   // Auth URL detection in text content
   extractAndSendAuthUrl(event);
-}
-
-// === Memory flush ===
-
-/**
- * Memory flush — ask Claude to save important facts from the conversation.
- * Uses the same session (no separate process). Silent: events NOT forwarded to UI.
- */
-async function memoryFlush(): Promise<void> {
-  if (!session) return;
-
-  console.log("[runner] Memory flush — saving conversation facts...");
-  isMemoryFlushing = true;
-  streamAborted = false;
-
-  try {
-    await session.send(MEMORY_FLUSH_PROMPT);
-    isStreaming = true;
-
-    for await (const msg of session.stream()) {
-      if (streamAborted) break;
-      // Just drain the stream, don't forward to UI
-      // But still track result to know when done
-      if ((msg as any).type === "result") break;
-    }
-
-    console.log("[runner] Memory flush completed");
-  } catch (err) {
-    console.warn("[runner] Memory flush error:", err);
-  } finally {
-    isStreaming = false;
-    isMemoryFlushing = false;
-  }
 }
 
 // === Incomplete task detection ===
