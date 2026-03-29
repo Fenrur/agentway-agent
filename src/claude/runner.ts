@@ -577,5 +577,19 @@ function checkForAuthUrl(text: string): void {
     const url = match[0];
     console.log(`[runner] Auth URL detected: ${url}`);
     sendMessage({ type: "auth_link", url });
+    openInAgentBrowser(url);
+  }
+}
+
+/** Open a URL in the agent's Chromium browser (visible via VNC). */
+function openInAgentBrowser(url: string): void {
+  try {
+    Bun.spawn(["bash", "-c", `DISPLAY=:1 xdg-open '${url.replace(/'/g, "'\\''")}'`], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    console.log(`[runner] Opened auth URL in agent browser`);
+  } catch {
+    // Non-fatal — the URL is still sent to the UI via auth_link
   }
 }
