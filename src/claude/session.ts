@@ -2,7 +2,6 @@
 // Gestion de la session Claude Code — persistance du session ID.
 // Permet de reprendre une session existante avec --resume <sessionId>.
 
-import { join } from "path";
 import { SessionDataSchema, type SessionData } from "../schemas/session.ts";
 
 /** Chemin du fichier de session dans le home agent (writable) */
@@ -51,9 +50,9 @@ export async function saveSession(sessionId: string): Promise<void> {
     const exists = await file.exists();
     if (exists) {
       try {
-        const existing: SessionData = JSON.parse(await file.text());
-        if (existing.createdAt) {
-          data.createdAt = existing.createdAt;
+        const parsed = SessionDataSchema.safeParse(JSON.parse(await file.text()));
+        if (parsed.success && parsed.data.createdAt) {
+          data.createdAt = parsed.data.createdAt;
         }
       } catch {
         // Fichier corrompu — on ecrase tout
