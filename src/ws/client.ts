@@ -1,9 +1,10 @@
 // src/ws/client.ts
 // WebSocket client vers le backend avec reconnexion exponential backoff.
 
-import type { DaemonInboundMessage, DaemonOutboundMessage } from "./types.ts";
+import type { DaemonOutboundMessage } from "./types.ts";
 import { handleInboundMessage } from "./handlers.ts";
 import { isBusy } from "../claude/runner.ts";
+import { backendToAgentMessageSchema } from "../schemas/ws-messages.ts";
 
 // === Constantes reconnexion ===
 
@@ -116,18 +117,20 @@ export function connect(
   });
 
   ws.addEventListener("message", (event) => {
-    let msg: Record<string, unknown>;
+    let json: unknown;
     try {
-      msg = JSON.parse(typeof event.data === "string" ? event.data : "");
+      json = JSON.parse(typeof event.data === "string" ? event.data : "");
     } catch {
       console.warn("[ws-client] Received non-JSON message, ignoring");
       return;
     }
 
-    if (!msg || typeof msg !== "object" || !("type" in msg)) {
-      console.warn("[ws-client] Received message without type field, ignoring");
+    const parsed = backendToAgentMessageSchema.safeParse(json);
+    if (!parsed.success) {
+      console.warn("[ws-client] Received invalid message, ignoring");
       return;
     }
+    const msg = parsed.data;
 
     // Handle auth_ok response — send daemon_connected + current status after successful auth
     if (msg.type === "auth_ok") {
@@ -143,7 +146,7 @@ export function connect(
       return;
     }
 
-    handleInboundMessage(msg as DaemonInboundMessage);
+    handleInboundMessage(msg);
   });
 
   ws.addEventListener("close", (event) => {

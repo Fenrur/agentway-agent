@@ -3,15 +3,10 @@
 // Permet de reprendre une session existante avec --resume <sessionId>.
 
 import { join } from "path";
+import { SessionDataSchema, type SessionData } from "../schemas/session.ts";
 
 /** Chemin du fichier de session dans le home agent (writable) */
 const SESSION_FILE = "/home/agent/.agentway-session.json";
-
-interface SessionData {
-  sessionId: string;
-  createdAt: string;
-  updatedAt: string;
-}
 
 /**
  * Charge le session ID depuis le fichier session.json.
@@ -24,12 +19,12 @@ export async function loadSession(): Promise<string | null> {
     if (!exists) return null;
 
     const text = await file.text();
-    const data: SessionData = JSON.parse(text);
-
-    if (!data.sessionId || typeof data.sessionId !== "string") {
-      console.warn("[session] Invalid session file — missing sessionId");
+    const parsed = SessionDataSchema.safeParse(JSON.parse(text));
+    if (!parsed.success) {
+      console.warn("[session] Invalid session file:", parsed.error.message);
       return null;
     }
+    const data = parsed.data;
 
     console.log(`[session] Loaded session: ${data.sessionId.slice(0, 8)}...`);
     return data.sessionId;

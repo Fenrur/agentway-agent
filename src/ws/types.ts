@@ -3,11 +3,7 @@
 
 // === Messages Backend -> Daemon (inbound) ===
 
-export type DaemonInboundMessage =
-  | { type: "inject_message"; content: string; attachments?: string[] }
-  | { type: "exec"; requestId: string; command: string }
-  | { type: "kill" }
-  | { type: "clipboard_set"; text: string };
+export type { DaemonInboundMessage } from "../schemas/ws-messages.ts";
 
 // === Messages Daemon -> Backend (outbound) ===
 
@@ -24,4 +20,4 @@ export type DaemonOutboundMessage =
 
 // === Union ===
 
-export type DaemonMessage = DaemonInboundMessage | DaemonOutboundMessage;
+export type DaemonMessage = import("../schemas/ws-messages.ts").DaemonInboundMessage | DaemonOutboundMessage;
