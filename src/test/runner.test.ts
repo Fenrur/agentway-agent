@@ -348,6 +348,51 @@ describe("writeSystemPromptFile", () => {
   });
 });
 
+describe("closeSession", () => {
+  test("sets session to null (no longer busy after close)", async () => {
+    // First create a session by running a prompt
+    streamEvents = [
+      { type: "system", subtype: "init", model: "test" },
+      { type: "result", subtype: "success", result: "OK", is_error: false, session_id: "close-test" },
+    ];
+
+    await runner.runPrompt("Setup");
+    expect(runner.isBusy()).toBe(false);
+
+    // Now close the session
+    runner.closeSession();
+    // After close, the runner should not be busy
+    expect(runner.isBusy()).toBe(false);
+  });
+});
+
+describe("resetSession", () => {
+  test("clears session and next prompt creates new session", async () => {
+    // Run once to establish a session
+    streamEvents = [
+      { type: "system", subtype: "init", model: "test" },
+      { type: "result", subtype: "success", result: "First", is_error: false, session_id: "s-reset" },
+    ];
+    await runner.runPrompt("First");
+
+    // Reset
+    runner.resetSession();
+    mockCreateSession.mockClear();
+    mockResumeSession.mockClear();
+    storedSessionId = null;
+
+    // Run again — should create a new session (not resume)
+    streamEvents = [
+      { type: "system", subtype: "init", model: "test" },
+      { type: "result", subtype: "success", result: "Second", is_error: false, session_id: "s-new" },
+    ];
+    await runner.runPrompt("Second");
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockResumeSession).not.toHaveBeenCalled();
+  });
+});
+
 describe("SDKResultError", () => {
   test("gets result field added from errors array", async () => {
     streamEvents = [
