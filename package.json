@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "bun test src/test/session.test.ts && bun test src/test/ws-client.test.ts && bun test src/test/handlers.test.ts && bun test src/test/runner.test.ts",
+    "test": "bun test src/test/session.test.ts && bun test src/test/ws-client.test.ts && bun test src/test/handlers.test.ts && bun test src/test/runner.test.ts && bun test src/test/runner-utils.test.ts",
     "postinstall": "bash scripts/patch-sdk.sh"
   },
   "devDependencies": {

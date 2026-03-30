@@ -23,7 +23,7 @@ import { loadSession, saveSession, clearSession } from "./session.ts";
 const MAX_TURN_MS = 30 * 60 * 1000;
 
 /** Pattern pour detecter un lien d'auth dans le texte */
-const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s"'<>]*/i;
+export const AUTH_URL_PATTERN = /https?:\/\/[^\s"'<>]*(?:claude\.ai|anthropic\.com)[^\s"'<>]*/i;
 
 /** Max auto-continue iterations to prevent infinite loops */
 const MAX_AUTO_CONTINUES = 10;
@@ -490,7 +490,7 @@ function processSDKMessage(msg: SDKMessage): void {
 
 // === Incomplete task detection ===
 
-function detectIncompleteTask(resultText: string): boolean {
+export function detectIncompleteTask(resultText: string): boolean {
   // Empty result after many events = Claude stopped mid-task (tool-call limit)
   if (!resultText.trim() && eventCount >= 5) {
     console.log(`[runner] Detected premature stop: empty result after ${eventCount} events`);
@@ -529,7 +529,7 @@ function detectIncompleteTask(resultText: string): boolean {
 
 // === Auth URL detection ===
 
-function extractAndSendAuthUrl(event: Record<string, unknown>): void {
+export function extractAndSendAuthUrl(event: Record<string, unknown>): void {
   const textsToCheck: string[] = [];
 
   // Event system (init, messages)
