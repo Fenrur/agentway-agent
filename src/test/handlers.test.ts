@@ -103,6 +103,62 @@ describe("inject_message", () => {
   });
 });
 
+describe("attachment path traversal", () => {
+  test("'..' in path is filtered", () => {
+    handleInboundMessage({
+      type: "inject_message",
+      content: "Check this file",
+      attachments: ["../../../etc/passwd", "safe-file.txt"],
+    });
+    expect(mockRunPrompt).toHaveBeenCalledTimes(1);
+    const prompt = mockRunPrompt.mock.calls[0][0] as string;
+    // The ".." path should be filtered out
+    expect(prompt).not.toContain("../../../etc/passwd");
+    // The safe file should be included
+    expect(prompt).toContain("[Attached file: safe-file.txt]");
+  });
+
+  test("attachment starting with '/' is filtered", () => {
+    handleInboundMessage({
+      type: "inject_message",
+      content: "Check this file",
+      attachments: ["/etc/shadow", "relative-path.txt"],
+    });
+    expect(mockRunPrompt).toHaveBeenCalledTimes(1);
+    const prompt = mockRunPrompt.mock.calls[0][0] as string;
+    // Absolute path should be filtered out
+    expect(prompt).not.toContain("/etc/shadow");
+    // Relative path should be included
+    expect(prompt).toContain("[Attached file: relative-path.txt]");
+  });
+
+  test("only valid string paths pass", () => {
+    handleInboundMessage({
+      type: "inject_message",
+      content: "Check files",
+      attachments: ["valid.txt", "also/valid/path.md"],
+    });
+    expect(mockRunPrompt).toHaveBeenCalledTimes(1);
+    const prompt = mockRunPrompt.mock.calls[0][0] as string;
+    expect(prompt).toContain("[Attached file: valid.txt]");
+    expect(prompt).toContain("[Attached file: also/valid/path.md]");
+  });
+
+  test("all unsafe paths filtered leaves no attachment lines", () => {
+    handleInboundMessage({
+      type: "inject_message",
+      content: "Hello",
+      attachments: ["../secret", "/root/.ssh/id_rsa"],
+    });
+    expect(mockRunPrompt).toHaveBeenCalledTimes(1);
+    const prompt = mockRunPrompt.mock.calls[0][0] as string;
+    // No attachment lines should be present
+    expect(prompt).not.toContain("[Attached file:");
+    // Original content should still be there
+    expect(prompt).toBe("Hello");
+  });
+});
+
 describe("kill", () => {
   test("calls interruptCurrent", () => {
     handleInboundMessage({ type: "kill" });
