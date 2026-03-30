@@ -5,7 +5,12 @@
 import { SessionDataSchema, type SessionData } from "../schemas/session.ts";
 
 /** Chemin du fichier de session dans le home agent (writable) */
-const SESSION_FILE = "/home/agent/.agentway-session.json";
+let SESSION_FILE = "/home/agent/.agentway-session.json";
+
+/** Override session file path (used by tests). */
+export function setSessionFilePath(p: string): void {
+  SESSION_FILE = p;
+}
 
 /**
  * Charge le session ID depuis le fichier session.json.
