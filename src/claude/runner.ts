@@ -94,6 +94,13 @@ const AGENT_SYSTEM_PROMPT = [
   "- Reponds en francais sauf si l'utilisateur parle en anglais.",
   "- Quand tu executes des actions repetitives, ne decris pas chaque etape. Fais-les et donne un resume a la fin.",
   "",
+  "### Securite",
+  "- Ne modifie JAMAIS les fichiers de config Claude (~/.claude/settings.json, ~/.claude.json, ~/.claude/mcp_servers.json).",
+  "- Ne lance pas de commandes destructives (rm -rf, drop database) sans confirmation explicite.",
+  "- Les credentials sont dans ~/.credentials/ — ne les affiche jamais en clair dans tes reponses.",
+].join("\n");
+
+const PERSONA_SYSTEM_PROMPT = [
   "### Persona et identite",
   "- Tes fichiers de persona sont dans `~/.agent/`. Lis-les au debut de chaque session pour connaitre ton identite.",
   "  - `SOUL.md` — ta personnalite, ton ton, ta facon de penser",
@@ -103,12 +110,6 @@ const AGENT_SYSTEM_PROMPT = [
   "  - `MEMORY.md` — notes persistantes a relire et mettre a jour",
   "  - `BOOTSTRAP.md` — checklist de demarrage (executee au premier message, supprimee ensuite)",
   "- Tu peux lire et modifier ces fichiers pour mettre a jour ta memoire ou ta persona.",
-  "- Si le dossier `~/.agent/` n'existe pas, tu n'as pas de persona — reponds normalement.",
-  "",
-  "### Securite",
-  "- Ne modifie JAMAIS les fichiers de config Claude (~/.claude/settings.json, ~/.claude.json, ~/.claude/mcp_servers.json).",
-  "- Ne lance pas de commandes destructives (rm -rf, drop database) sans confirmation explicite.",
-  "- Les credentials sont dans ~/.credentials/ — ne les affiche jamais en clair dans tes reponses.",
 ].join("\n");
 
 /** Read persona files from .agent/ and build a persona system prompt section. */
@@ -143,7 +144,8 @@ export async function writeSystemPromptFile(): Promise<void> {
 
   const personaPrompt = await buildPersonaPrompt();
   if (personaPrompt) {
-    content = personaPrompt + "\n\n---\n\n";
+    // Persona enabled — include persona files + persona instructions
+    content = personaPrompt + "\n\n---\n\n" + PERSONA_SYSTEM_PROMPT + "\n\n";
     console.log("[runner] Persona enabled — writing to CLAUDE.md");
   }
 
