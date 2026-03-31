@@ -40,6 +40,67 @@ const BOOT_FILE = "/home/agent/.agent/BOOTSTRAP.md";
 const CLAUDE_MD_FILE = "/home/agent/CLAUDE.md";
 const RUNNING_PROMPT_FILE = "/home/agent/.agentway-running-prompt.json";
 
+// === AskUserQuestion ===
+
+/** Map of pending questions waiting for user answers */
+const pendingQuestions = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void }>();
+
+/** Timeout for user to answer a question (5 minutes) */
+const ASK_USER_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Forward an AskUserQuestion tool call to the backend via WS.
+ * Returns a Promise that resolves when the user answers (or times out).
+ */
+async function forwardAskUserQuestion(input: Record<string, unknown>): Promise<any> {
+  const requestId = crypto.randomUUID();
+
+  // Send question to backend via WS
+  sendMessage({
+    type: "ask_user_question",
+    requestId,
+    questions: input.questions,
+  } as any);
+
+  // Wait for answer from backend
+  return new Promise((resolve, _reject) => {
+    const timeout = setTimeout(() => {
+      pendingQuestions.delete(requestId);
+      // Timeout: deny the tool (Claude will see the denial message)
+      resolve({ behavior: "deny", message: "L'utilisateur n'a pas répondu dans les 5 minutes." });
+    }, ASK_USER_TIMEOUT_MS);
+
+    pendingQuestions.set(requestId, {
+      resolve: (answers) => {
+        clearTimeout(timeout);
+        pendingQuestions.delete(requestId);
+        resolve({
+          behavior: "allow",
+          updatedInput: { ...input, answers },
+        });
+      },
+      reject: (reason) => {
+        clearTimeout(timeout);
+        pendingQuestions.delete(requestId);
+        resolve({ behavior: "deny", message: String(reason) });
+      },
+    });
+  });
+}
+
+/**
+ * Called by handlers.ts when an answer_question message arrives from the backend.
+ * Resolves the pending Promise so the SDK can continue.
+ */
+export function resolveAskUserQuestion(requestId: string, answers: Record<string, string>): void {
+  const pending = pendingQuestions.get(requestId);
+  if (pending) {
+    pending.resolve(answers);
+  } else {
+    console.warn(`[runner] No pending question for requestId ${requestId}`);
+  }
+}
+
 // === State ===
 
 /** SDK V2 persistent session */
@@ -211,6 +272,12 @@ async function ensureSession(): Promise<SDKSession> {
   const options: Record<string, unknown> = {
     model: "claude-opus-4-6[1m]",
     permissionMode: "bypassPermissions",
+    canUseTool: async (toolName: string, toolInput: Record<string, unknown>) => {
+      if (toolName === "AskUserQuestion") {
+        return await forwardAskUserQuestion(toolInput);
+      }
+      return { behavior: "allow" as const, updatedInput: toolInput };
+    },
   };
 
   if (existingSessionId) {

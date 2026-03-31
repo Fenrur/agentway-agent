@@ -8,11 +8,13 @@ import { test, expect, beforeEach, mock, describe } from "bun:test";
 const mockRunPrompt = mock(() => Promise.resolve());
 const mockInterruptCurrent = mock(() => true);
 const mockResetSession = mock(() => {});
+const mockResolveAskUserQuestion = mock(() => {});
 
 mock.module("../claude/runner.ts", () => ({
   runPrompt: mockRunPrompt,
   interruptCurrent: mockInterruptCurrent,
   resetSession: mockResetSession,
+  resolveAskUserQuestion: mockResolveAskUserQuestion,
   isBusy: () => false,
 }));
 

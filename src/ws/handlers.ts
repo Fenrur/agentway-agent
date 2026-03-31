@@ -2,7 +2,7 @@
 // Handlers pour les messages inbound recus du backend.
 
 import type { DaemonInboundMessage } from "./types.ts";
-import { runPrompt, interruptCurrent, resetSession } from "../claude/runner.ts";
+import { runPrompt, interruptCurrent, resetSession, resolveAskUserQuestion } from "../claude/runner.ts";
 import { sendMessage } from "./client.ts";
 
 /**
@@ -24,6 +24,10 @@ export function handleInboundMessage(msg: DaemonInboundMessage): void {
 
     case "clipboard_set":
       handleClipboardSet(msg.text);
+      break;
+
+    case "answer_question":
+      handleAnswerQuestion(msg.requestId, msg.answers);
       break;
 
     default: {
@@ -166,6 +170,14 @@ function handleKill(): void {
   if (!interrupted) {
     console.log("[handlers] No active stream to interrupt");
   }
+}
+
+/**
+ * Resolve a pending AskUserQuestion with the user's answers.
+ */
+function handleAnswerQuestion(requestId: string, answers: Record<string, string>): void {
+  console.log(`[handlers] answer_question received (requestId: ${requestId})`);
+  resolveAskUserQuestion(requestId, answers);
 }
 
 /**

@@ -26,11 +26,18 @@ export const clipboardSetSchema = z.object({
   text: z.string(),
 });
 
+export const answerQuestionSchema = z.object({
+  type: z.literal("answer_question"),
+  requestId: z.string(),
+  answers: z.record(z.string(), z.string()),
+});
+
 export const daemonInboundMessageSchema = z.discriminatedUnion("type", [
   injectMessageSchema,
   execSchema,
   killSchema,
   clipboardSetSchema,
+  answerQuestionSchema,
 ]);
 
 export type DaemonInboundMessage = z.infer<typeof daemonInboundMessageSchema>;
@@ -53,6 +60,7 @@ export const backendToAgentMessageSchema = z.discriminatedUnion("type", [
   execSchema,
   killSchema,
   clipboardSetSchema,
+  answerQuestionSchema,
   authOkSchema,
   errorSchema,
 ]);

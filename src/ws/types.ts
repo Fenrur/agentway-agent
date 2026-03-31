@@ -16,6 +16,7 @@ export type DaemonOutboundMessage =
   | { type: "exec_result"; requestId: string; stdout: string; stderr: string; exitCode: number }
   | { type: "persona_update"; name: string | null; emoji: string | null }
   | { type: "onboarding_completed" }
+  | { type: "ask_user_question"; requestId: string; questions: unknown }
   | { type: "error"; code: string; message: string };
 
 // === Union ===
