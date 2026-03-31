@@ -269,9 +269,13 @@ async function ensureSession(): Promise<SDKSession> {
 
   const existingSessionId = await loadSession();
 
+  // Use canUseTool as our permission handler instead of bypassPermissions.
+  // bypassPermissions makes the CLI auto-approve everything internally,
+  // which prevents canUseTool from ever being called — breaking AskUserQuestion.
+  // With canUseTool, every tool call goes through our callback (~1ms overhead).
+  // We approve everything instantly except AskUserQuestion which gets forwarded to the UI.
   const options: Record<string, unknown> = {
     model: "claude-opus-4-6[1m]",
-    permissionMode: "bypassPermissions",
     canUseTool: async (toolName: string, toolInput: Record<string, unknown>) => {
       if (toolName === "AskUserQuestion") {
         return await forwardAskUserQuestion(toolInput);
